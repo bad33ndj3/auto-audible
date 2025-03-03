@@ -1,0 +1,14 @@
+version: 3
+tasks:
+  download:
+    cmds:
+      - go run main.go download
+
+  decrypt:
+    cmds:
+      - go run main.go decrypt
+
+  all:
+    cmds:
+      - go run main.go all
+      - go run main.go clean

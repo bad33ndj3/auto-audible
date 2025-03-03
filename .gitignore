@@ -1,0 +1,5 @@
+.idea
+media/
+downloaded_asins.json
+library.tsv
+.DS_Store
