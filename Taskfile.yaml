@@ -1,14 +1,46 @@
-version: 3
+version: '3'
+
+vars:
+  IMAGE: auto-audible
+
 tasks:
-  download:
+  default:
+    desc: Show available tasks
     cmds:
-      - go run main.go download
+      - task --list
+    silent: true
+
+  download:
+    desc: Download new books on the host
+    cmds:
+      - go run . download {{.CLI_ARGS}}
+
+  convert:
+    desc: Convert downloaded AAX files on the host
+    cmds:
+      - go run . convert {{.CLI_ARGS}}
 
   decrypt:
+    desc: Alias for convert on the host
     cmds:
-      - go run main.go decrypt
+      - go run . decrypt {{.CLI_ARGS}}
+
+  clean:
+    desc: Remove intermediate media files on the host
+    cmds:
+      - go run . clean {{.CLI_ARGS}}
 
   all:
+    desc: Download and convert on the host
     cmds:
-      - go run main.go all
-      - go run main.go clean
+      - go run . all {{.CLI_ARGS}}
+
+  docker-build:
+    desc: Build the Docker image
+    cmds:
+      - docker build -t {{.IMAGE}} .
+
+  docker-all:
+    desc: Download and convert in Docker
+    cmds:
+      - docker run --rm -it -v "${AUDIBLE_CONFIG_DIR:-$HOME/.audible}:/root/.audible" -v "$PWD:/work" -w /work {{.IMAGE}} all {{.CLI_ARGS}}

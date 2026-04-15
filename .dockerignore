@@ -1,0 +1,13 @@
+.git
+.gitignore
+.DS_Store
+media
+downloaded_asins.json
+library.tsv
+*.m4b
+*.aax
+*.aaxc
+*.jpg
+*.json
+*.voucher
+*.pdf

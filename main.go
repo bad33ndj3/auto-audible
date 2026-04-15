@@ -4,59 +4,65 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
-
-	"golang.org/x/term"
 )
 
-// downloadedAsinsPath is the local JSON file that keeps track of downloaded ASINs.
 const downloadedAsinsPath = "downloaded_asins.json"
 
-// libraryTSV is the name of the exported TSV file from "audible library export".
-const libraryTSV = "library.tsv"
+var activationBytesPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}$`)
+
+type config struct {
+	MediaDir string
+	Password string
+	Profile  string
+}
+
+type libraryItem struct {
+	ASIN string `json:"asin"`
+}
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(1)
+	command, cfg, err := parseArgs(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		log.Fatalf("invalid arguments: %v", err)
 	}
 
-	switch os.Args[1] {
-	case "download":
-		authPwd, err := promptPassword("Please enter your auth-file password: ")
-		if err != nil {
-			log.Fatalf("failed to read password: %v", err)
+	if command != "clean" {
+		if err := ensureAudibleConfigured(); err != nil {
+			log.Fatal(err)
 		}
-		if err := doDownload(authPwd); err != nil {
+	}
+
+	switch command {
+	case "download":
+		if err := doDownload(cfg); err != nil {
 			log.Fatalf("download failed: %v", err)
 		}
-	case "decrypt":
-		authPwd, err := promptPassword("Please enter your auth-file password: ")
-		if err != nil {
-			log.Fatalf("failed to read password: %v", err)
-		}
-		if err := doDecrypt(authPwd); err != nil {
-			log.Fatalf("decrypt failed: %v", err)
+	case "convert", "decrypt":
+		if err := doConvert(cfg); err != nil {
+			log.Fatalf("convert failed: %v", err)
 		}
 	case "clean":
-		if err := doClean(); err != nil {
+		if err := doClean(cfg); err != nil {
 			log.Fatalf("clean failed: %v", err)
 		}
 	case "all":
-		authPwd, err := promptPassword("Please enter your auth-file password: ")
-		if err != nil {
-			log.Fatalf("failed to read password: %v", err)
-		}
-		if err := doDownload(authPwd); err != nil {
+		if err := doDownload(cfg); err != nil {
 			log.Fatalf("download failed: %v", err)
 		}
-		if err := doDecrypt(authPwd); err != nil {
-			log.Fatalf("decrypt failed: %v", err)
+		if err := doConvert(cfg); err != nil {
+			log.Fatalf("convert failed: %v", err)
 		}
 	default:
 		usage()
@@ -64,68 +70,166 @@ func main() {
 	}
 }
 
-// delete all files of type aaxc, aax, jpg, json, voucher and pdf in the folder media
-func doClean() error {
-	files, err := os.ReadDir("media")
-	if err != nil {
-		return fmt.Errorf("failed to read media directory: %w", err)
+func parseArgs(args []string) (string, config, error) {
+	if len(args) == 0 {
+		usage()
+		return "", config{}, fmt.Errorf("missing command")
 	}
 
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), ".aaxc") ||
-			strings.HasSuffix(file.Name(), ".aax") ||
-			strings.HasSuffix(file.Name(), ".jpg") ||
-			strings.HasSuffix(file.Name(), ".json") ||
-			strings.HasSuffix(file.Name(), ".voucher") ||
-			strings.HasSuffix(file.Name(), ".pdf") {
-			if err := os.Remove("media/" + file.Name()); err != nil {
-				return fmt.Errorf("failed to remove %s: %w", file.Name(), err)
-			}
-		}
+	command := args[0]
+	switch command {
+	case "download", "convert", "decrypt", "clean", "all":
+	default:
+		usage()
+		return "", config{}, fmt.Errorf("unknown command %q", command)
+	}
+
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	cfg := config{}
+	fs.StringVar(&cfg.MediaDir, "media-dir", "media", "directory for downloaded and converted media")
+	fs.StringVar(&cfg.Password, "password", "", "optional audible auth-file password")
+	fs.StringVar(&cfg.Profile, "profile", "", "optional audible-cli profile")
+
+	if err := fs.Parse(args[1:]); err != nil {
+		return "", config{}, err
+	}
+	if fs.NArg() != 0 {
+		return "", config{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+
+	return command, cfg, nil
+}
+
+func usage() {
+	fmt.Println("Usage:")
+	fmt.Println("  go run . <command> [flags]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  download   Export the Audible library and download new titles")
+	fmt.Println("  convert    Convert downloaded .aax files to .m4b with ffmpeg")
+	fmt.Println("  decrypt    Alias for convert (kept for older usage)")
+	fmt.Println("  clean      Remove intermediate download files from the media dir")
+	fmt.Println("  all        Run download and convert")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  --media-dir <dir>   Media directory (default: media)")
+	fmt.Println("  --password <pwd>   Optional auth-file password")
+	fmt.Println("  --profile <name>   Optional audible-cli profile")
+	fmt.Println()
+	fmt.Println("If audible-cli is not configured yet, the program will ask to run `audible quickstart`.")
+	fmt.Println("If --password is omitted, audible-cli will use an unencrypted auth file or prompt when needed.")
+}
+
+func ensureAudibleConfigured() error {
+	if _, err := exec.LookPath("audible"); err != nil {
+		return fmt.Errorf("audible-cli was not found on PATH")
+	}
+
+	hasProfiles, err := hasAudibleProfile()
+	if err == nil && hasProfiles {
+		return nil
+	}
+
+	if !isInteractive() {
+		return fmt.Errorf("audible-cli does not appear configured; run `audible quickstart` once and rerun this command")
+	}
+
+	shouldRun, promptErr := promptYesNo("audible-cli does not appear configured. Run `audible quickstart` now? [y/N]: ", false)
+	if promptErr != nil {
+		return fmt.Errorf("failed to confirm audible quickstart state: %w", promptErr)
+	}
+	if !shouldRun {
+		return fmt.Errorf("audible-cli is required; run `audible quickstart` and rerun this command")
+	}
+
+	if err := runCmd("audible", "quickstart"); err != nil {
+		return fmt.Errorf("audible quickstart failed: %w", err)
+	}
+
+	hasProfiles, err = hasAudibleProfile()
+	if err != nil {
+		return fmt.Errorf("failed to validate audible quickstart: %w", err)
+	}
+	if !hasProfiles {
+		return fmt.Errorf("audible quickstart finished, but no profile was detected")
 	}
 
 	return nil
 }
 
-func usage() {
-	fmt.Println("Usage:")
-	fmt.Println("  go run main.go download")
-	fmt.Println("  go run main.go decrypt")
-	fmt.Println("  go run main.go all")
+func hasAudibleProfile() (bool, error) {
+	output, err := runCmdOutput("audible", "manage", "profile", "list")
+	if err != nil {
+		return false, err
+	}
+
+	rowCount := 0
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "|") {
+			rowCount++
+		}
+	}
+
+	return rowCount >= 2, nil
 }
 
-// doDownload prompts for password, exports the library, parses library.tsv, and
-// downloads books whose ASINs are not yet in downloaded_asins.json.
-func doDownload(authPwd string) error {
-	fmt.Println("Exporting library to", libraryTSV)
-	if err := runCmd("audible", "--password", authPwd, "library", "export"); err != nil {
+func doDownload(cfg config) error {
+	if err := os.MkdirAll(cfg.MediaDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create media directory: %w", err)
+	}
+
+	libraryFile, err := os.CreateTemp("", "auto-audible-library-*.json")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary library export file: %w", err)
+	}
+	libraryPath := libraryFile.Name()
+	if err := libraryFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary library export file: %w", err)
+	}
+	defer os.Remove(libraryPath)
+
+	fmt.Println("Exporting library to temporary JSON file")
+	if err := runCmd("audible", audibleArgs(cfg, "library", "export", "--format", "json", "--output", libraryPath)...); err != nil {
 		return fmt.Errorf("failed to export library: %w", err)
 	}
 
-	asins, err := parseLibraryTSV(libraryTSV)
+	asins, err := parseLibraryJSON(libraryPath)
 	if err != nil {
-		return fmt.Errorf("failed to parse %s: %w", libraryTSV, err)
+		return fmt.Errorf("failed to parse library export: %w", err)
+	}
+
+	if len(asins) == 0 {
+		fmt.Println("No library items found in Audible export")
+		return nil
 	}
 
 	downloaded, err := loadDownloadedAsins()
 	if err != nil {
-		return fmt.Errorf("failed to load downloaded asins: %w", err)
+		return fmt.Errorf("failed to load downloaded ASINs: %w", err)
+	}
+
+	downloadedSet := make(map[string]struct{}, len(downloaded))
+	for _, asin := range downloaded {
+		downloadedSet[asin] = struct{}{}
 	}
 
 	for _, asin := range asins {
-		if asin == "" {
+		if _, ok := downloadedSet[asin]; ok {
+			fmt.Printf("ASIN %s already downloaded, skipping.\n", asin)
 			continue
 		}
-		if !contains(downloaded, asin) {
-			fmt.Printf("Downloading new book with ASIN: %s\n", asin)
-			// Perform the audible download with the user’s desired flags.
-			// Pass the password each time.
-			err := runCmd(
-				"audible",
-				"--password", authPwd,
+
+		fmt.Printf("Downloading new book with ASIN: %s\n", asin)
+		err := runCmd(
+			"audible",
+			audibleArgs(
+				cfg,
 				"download",
 				"--asin", asin,
-				"--output-dir", "media",
+				"--output-dir", cfg.MediaDir,
 				"-y",
 				"--ignore-errors",
 				"--aax-fallback",
@@ -136,116 +240,160 @@ func doDownload(authPwd string) error {
 				"-q", "high",
 				"--overwrite",
 				"--ignore-podcasts",
-			)
-			if err != nil {
-				// Don’t add the ASIN to our list if the download failed.
-				fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
-				continue
-			}
-			// Add to downloaded list and save.
-			downloaded = append(downloaded, asin)
-			if err := saveDownloadedAsins(downloaded); err != nil {
-				return fmt.Errorf("failed to save downloaded asins: %w", err)
-			}
-		} else {
-			fmt.Printf("ASIN %s already downloaded, skipping.\n", asin)
+			)...,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
+			continue
+		}
+
+		downloaded = append(downloaded, asin)
+		downloadedSet[asin] = struct{}{}
+		if err := saveDownloadedAsins(downloaded); err != nil {
+			return fmt.Errorf("failed to save downloaded ASINs: %w", err)
 		}
 	}
+
 	return nil
 }
 
-// doDecrypt prompts for password, then decrypts all downloaded AAX files.
-func doDecrypt(authPwd string) error {
-	fmt.Println("Decrypting all downloaded AAX files...")
-	runCmd("cd", "media")
-	defer runCmd("cd", "..")
-	return runCmd(
-		"audible", "--password", authPwd,
-		"decrypt",
-		"--all",
-		"--overwrite",
-	)
-}
-
-// promptPassword reads a password from stdin without echoing to the terminal.
-func promptPassword(prompt string) (string, error) {
-	fmt.Print(prompt)
-	// Turn off input echoing, read the password, then restore.
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return "", err
+func doConvert(cfg config) error {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf("ffmpeg was not found on PATH; install ffmpeg or use the Docker image for conversion")
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	line, err := readLine(os.Stdin)
-	fmt.Println() // just to move to a new line after user presses Enter
+	activationBytes, err := getActivationBytes(cfg)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return strings.TrimSpace(line), nil
-}
 
-// readLine is a minimal raw input reader used by promptPassword.
-func readLine(r io.Reader) (string, error) {
-	var sb strings.Builder
-	buf := make([]byte, 1)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if buf[0] == '\n' || buf[0] == '\r' {
-				break
-			}
-			sb.WriteByte(buf[0])
+	aaxFiles, err := filepath.Glob(filepath.Join(cfg.MediaDir, "*.aax"))
+	if err != nil {
+		return fmt.Errorf("failed to list .aax files: %w", err)
+	}
+	aaxcFiles, err := filepath.Glob(filepath.Join(cfg.MediaDir, "*.aaxc"))
+	if err != nil {
+		return fmt.Errorf("failed to list .aaxc files: %w", err)
+	}
+
+	if len(aaxFiles) == 0 {
+		fmt.Println("No .aax files found to convert")
+		if len(aaxcFiles) > 0 {
+			fmt.Fprintf(os.Stderr, "Found %d .aaxc file(s); automatic .m4b conversion currently only supports .aax files.\n", len(aaxcFiles))
 		}
+		return nil
+	}
+
+	failed := 0
+	for _, inputPath := range aaxFiles {
+		outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".m4b"
+		fmt.Printf("Converting %s -> %s\n", filepath.Base(inputPath), filepath.Base(outputPath))
+
+		err := runCmd(
+			"ffmpeg",
+			"-y",
+			"-loglevel", "error",
+			"-stats",
+			"-activation_bytes", activationBytes,
+			"-i", inputPath,
+			"-vn",
+			"-c:a", "copy",
+			outputPath,
+		)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return "", err
+			failed++
+			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", filepath.Base(inputPath), err)
 		}
 	}
-	return sb.String(), nil
+
+	if len(aaxcFiles) > 0 {
+		fmt.Fprintf(os.Stderr, "Found %d .aaxc file(s); automatic .m4b conversion currently only supports .aax files.\n", len(aaxcFiles))
+	}
+	if failed > 0 {
+		return fmt.Errorf("failed to convert %d file(s)", failed)
+	}
+
+	return nil
 }
 
-// parseLibraryTSV reads library.tsv (generated by `audible library export`) and returns
-// a slice of ASINs. We assume the first column is "asin", and the first row is a header row.
-func parseLibraryTSV(filename string) ([]string, error) {
-	f, err := os.Open(filename)
+func getActivationBytes(cfg config) (string, error) {
+	output, err := runCmdOutput("audible", audibleArgs(cfg, "activation-bytes")...)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch activation bytes: %w", err)
+	}
+
+	activationBytes := extractActivationBytes(output)
+	if activationBytes == "" {
+		return "", fmt.Errorf("audible activation-bytes did not return a usable activation key")
+	}
+
+	return activationBytes, nil
+}
+
+func extractActivationBytes(output string) string {
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if activationBytesPattern.MatchString(line) {
+			return strings.ToLower(line)
+		}
+	}
+	return ""
+}
+
+func parseLibraryJSON(filename string) ([]string, error) {
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
+	var items []libraryItem
+	if err := json.Unmarshal(data, &items); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{}, len(items))
 	var asins []string
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		// Skip the header (first line).
-		if lineCount == 1 {
+	for _, item := range items {
+		asin := strings.TrimSpace(item.ASIN)
+		if asin == "" {
 			continue
 		}
-		line := scanner.Text()
-		// TSV means columns are separated by tabs.
-		cols := strings.Split(line, "\t")
-		if len(cols) < 1 {
-			// Skip bad line or handle error
+		if _, ok := seen[asin]; ok {
 			continue
 		}
-		// The first column is the ASIN
-		asin := cols[0]
+		seen[asin] = struct{}{}
 		asins = append(asins, asin)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
+
 	return asins, nil
 }
 
-// loadDownloadedAsins loads the JSON array from downloaded_asins.json (if present).
+func doClean(cfg config) error {
+	files, err := os.ReadDir(cfg.MediaDir)
+	if err != nil {
+		return fmt.Errorf("failed to read media directory: %w", err)
+	}
+
+	for _, file := range files {
+		name := file.Name()
+		if strings.HasSuffix(name, ".aaxc") ||
+			strings.HasSuffix(name, ".aax") ||
+			strings.HasSuffix(name, ".jpg") ||
+			strings.HasSuffix(name, ".json") ||
+			strings.HasSuffix(name, ".voucher") ||
+			strings.HasSuffix(name, ".pdf") {
+			if err := os.Remove(filepath.Join(cfg.MediaDir, name)); err != nil {
+				return fmt.Errorf("failed to remove %s: %w", name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func loadDownloadedAsins() ([]string, error) {
 	if _, err := os.Stat(downloadedAsinsPath); os.IsNotExist(err) {
-		// If the file doesn't exist, return an empty slice.
 		return []string{}, nil
 	}
 
@@ -258,32 +406,82 @@ func loadDownloadedAsins() ([]string, error) {
 	if err := json.Unmarshal(data, &asins); err != nil {
 		return nil, err
 	}
+
 	return asins, nil
 }
 
-// saveDownloadedAsins overwrites downloaded_asins.json with the updated list.
 func saveDownloadedAsins(asins []string) error {
 	data, err := json.MarshalIndent(asins, "", "  ")
 	if err != nil {
 		return err
 	}
+
 	return os.WriteFile(downloadedAsinsPath, data, 0o644)
 }
 
-// runCmd is a helper to run an external command and forward its stdout/stderr.
+func audibleArgs(cfg config, args ...string) []string {
+	cmdArgs := make([]string, 0, len(args)+4)
+	if cfg.Profile != "" {
+		cmdArgs = append(cmdArgs, "--profile", cfg.Profile)
+	}
+	if cfg.Password != "" {
+		cmdArgs = append(cmdArgs, "--password", cfg.Password)
+	}
+	cmdArgs = append(cmdArgs, args...)
+	return cmdArgs
+}
+
 func runCmd(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-// contains checks if slice s contains string val.
-func contains(s []string, val string) bool {
-	for _, item := range s {
-		if item == val {
-			return true
+func runCmdOutput(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
+	output, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		if trimmed == "" {
+			return "", err
 		}
+		return "", fmt.Errorf("%w: %s", err, trimmed)
 	}
-	return false
+	return trimmed, nil
+}
+
+func isInteractive() bool {
+	stdin, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	stdout, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+
+	return (stdin.Mode()&os.ModeCharDevice) != 0 && (stdout.Mode()&os.ModeCharDevice) != 0
+}
+
+func promptYesNo(prompt string, defaultYes bool) (bool, error) {
+	fmt.Print(prompt)
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+
+	answer := strings.ToLower(strings.TrimSpace(line))
+	switch answer {
+	case "", "y", "yes":
+		return answer != "" || defaultYes, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("expected yes or no")
+	}
 }
