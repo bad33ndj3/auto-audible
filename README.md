@@ -34,15 +34,19 @@ The wrapper will also detect missing setup and ask to run it when you start the 
 go run . download [--profile audible] [--password secret] [--media-dir media]
 go run . convert  [--profile audible] [--password secret] [--media-dir media]
 go run . clean    [--media-dir media]
+go run . ready    [--media-dir media]
+go run . status   [--profile audible] [--password secret] [--media-dir media]
+go run . status   --status-table [--profile audible] [--password secret] [--media-dir media]
 go run . all      [--profile audible] [--password secret] [--media-dir media]
 ```
 
 Command summary:
 
 - `download`: exports the Audible library and downloads books whose ASIN is not yet present in `downloaded_asins.json`
-- `convert`: converts all `.aax` files in the media directory to `.m4b`
-- `decrypt`: alias for `convert`, kept for older usage
+- `convert`: converts `.aax` and `.aaxc` files in the media directory to `.m4b`
 - `clean`: removes intermediate `.aax`, `.aaxc`, `.jpg`, `.json`, `.voucher`, and `.pdf` files from the media directory
+- `ready`: lists ready-to-listen `.m4b` titles and what is still pending (`.aax` / `.aaxc`)
+- `status`: checks current library/media status (total library, tracked downloads, remaining, ready, pending conversions)
 - `all`: runs `download` and `convert`
 
 ## Auth behavior
@@ -70,14 +74,12 @@ go run . download --profile audible
 1. `auto-audible` checks whether `audible-cli` is available and configured.
 2. It exports your Audible library as JSON.
 3. It downloads only ASINs that are not already listed in `downloaded_asins.json`.
-4. It asks `audible-cli` for activation bytes.
-5. It uses `ffmpeg` to convert `.aax` files to `.m4b`.
+4. It asks `audible-cli` for activation bytes (for `.aax` conversion).
+5. It uses `ffmpeg` to convert `.aax` and `.aaxc` files to `.m4b`.
 
-## Important limitation
+## AAXC notes
 
-Automatic conversion currently supports `.aax` files only.
-
-If `audible-cli` falls back to `.aaxc` for a title, the download is preserved, but this wrapper will warn and skip `.m4b` conversion for that file.
+For `.aaxc`, conversion requires the matching `.voucher` file (same basename) because the key and IV are read from that voucher.
 
 ## Taskfile shortcuts
 
@@ -86,10 +88,20 @@ task
 task download
 task convert
 task clean
+task ready
+task status
 task all
 task docker-build
 task docker-all
 ```
+
+`status --status-table` lists every library title with one of these states:
+
+- `ready`
+- `needs_convert_aax`
+- `needs_convert_aaxc`
+- `tracked_no_media`
+- `not_downloaded`
 
 ## Docker
 

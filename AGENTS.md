@@ -15,8 +15,7 @@ This repository contains a small Go wrapper around `audible-cli`. The wrapper is
 - `--password` is optional by design
 - missing Audible setup should be detected through `audible manage profile list`
 - interactive runs may offer to launch `audible quickstart`
-- conversion currently supports `.aax` only; `.aaxc` should be reported, not silently treated as converted
-- `decrypt` is an alias for `convert` to preserve older usage
+- conversion supports `.aax` (activation bytes) and `.aaxc` (voucher key/iv)
 
 ## Files that matter
 
@@ -33,6 +32,7 @@ go test ./...
 go build ./...
 go run . download
 go run . convert
+go run . status
 go run . all
 task all
 ```

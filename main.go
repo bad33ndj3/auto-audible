@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -20,13 +21,51 @@ const downloadedAsinsPath = "downloaded_asins.json"
 var activationBytesPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}$`)
 
 type config struct {
-	MediaDir string
-	Password string
-	Profile  string
+	MediaDir    string
+	Password    string
+	Profile     string
+	StatusTable bool
 }
 
 type libraryItem struct {
-	ASIN string `json:"asin"`
+	ASIN  string `json:"asin"`
+	Title string `json:"title"`
+}
+
+type mediaState struct {
+	Ready     []string
+	NeedsAAX  []string
+	NeedsAAXC []string
+}
+
+type voucherFile struct {
+	ContentLicense struct {
+		ASIN            string `json:"asin"`
+		ContentMetadata struct {
+			ContentReference struct {
+				ContentFormat string `json:"content_format"`
+			} `json:"content_reference"`
+		} `json:"content_metadata"`
+		LicenseResponse struct {
+			Key string `json:"key"`
+			IV  string `json:"iv"`
+		} `json:"license_response"`
+	} `json:"content_license"`
+}
+
+type chapterFile struct {
+	ContentMetadata struct {
+		ContentReference struct {
+			ASIN          string `json:"asin"`
+			ContentFormat string `json:"content_format"`
+		} `json:"content_reference"`
+	} `json:"content_metadata"`
+}
+
+type bookMediaInfo struct {
+	HasM4B  bool
+	HasAAX  bool
+	HasAAXC bool
 }
 
 func main() {
@@ -38,7 +77,7 @@ func main() {
 		log.Fatalf("invalid arguments: %v", err)
 	}
 
-	if command != "clean" {
+	if command == "download" || command == "convert" || command == "status" || command == "all" {
 		if err := ensureAudibleConfigured(); err != nil {
 			log.Fatal(err)
 		}
@@ -49,13 +88,27 @@ func main() {
 		if err := doDownload(cfg); err != nil {
 			log.Fatalf("download failed: %v", err)
 		}
-	case "convert", "decrypt":
+		if err := printReadySummary(cfg.MediaDir); err != nil {
+			log.Fatalf("ready summary failed: %v", err)
+		}
+	case "convert":
 		if err := doConvert(cfg); err != nil {
 			log.Fatalf("convert failed: %v", err)
+		}
+		if err := printReadySummary(cfg.MediaDir); err != nil {
+			log.Fatalf("ready summary failed: %v", err)
 		}
 	case "clean":
 		if err := doClean(cfg); err != nil {
 			log.Fatalf("clean failed: %v", err)
+		}
+	case "status":
+		if err := doStatus(cfg); err != nil {
+			log.Fatalf("status failed: %v", err)
+		}
+	case "ready":
+		if err := printReadySummary(cfg.MediaDir); err != nil {
+			log.Fatalf("ready summary failed: %v", err)
 		}
 	case "all":
 		if err := doDownload(cfg); err != nil {
@@ -63,6 +116,9 @@ func main() {
 		}
 		if err := doConvert(cfg); err != nil {
 			log.Fatalf("convert failed: %v", err)
+		}
+		if err := printReadySummary(cfg.MediaDir); err != nil {
+			log.Fatalf("ready summary failed: %v", err)
 		}
 	default:
 		usage()
@@ -78,7 +134,7 @@ func parseArgs(args []string) (string, config, error) {
 
 	command := args[0]
 	switch command {
-	case "download", "convert", "decrypt", "clean", "all":
+	case "download", "convert", "clean", "ready", "status", "all":
 	default:
 		usage()
 		return "", config{}, fmt.Errorf("unknown command %q", command)
@@ -91,6 +147,7 @@ func parseArgs(args []string) (string, config, error) {
 	fs.StringVar(&cfg.MediaDir, "media-dir", "media", "directory for downloaded and converted media")
 	fs.StringVar(&cfg.Password, "password", "", "optional audible auth-file password")
 	fs.StringVar(&cfg.Profile, "profile", "", "optional audible-cli profile")
+	fs.BoolVar(&cfg.StatusTable, "status-table", false, "for status command: show all books in a table")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		return "", config{}, err
@@ -108,15 +165,17 @@ func usage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  download   Export the Audible library and download new titles")
-	fmt.Println("  convert    Convert downloaded .aax files to .m4b with ffmpeg")
-	fmt.Println("  decrypt    Alias for convert (kept for older usage)")
+	fmt.Println("  convert    Convert downloaded .aax/.aaxc files to .m4b with ffmpeg")
 	fmt.Println("  clean      Remove intermediate download files from the media dir")
+	fmt.Println("  ready      List ready-to-listen and pending books")
+	fmt.Println("  status     Show library and media status summary")
 	fmt.Println("  all        Run download and convert")
 	fmt.Println()
 	fmt.Println("Flags:")
 	fmt.Println("  --media-dir <dir>   Media directory (default: media)")
 	fmt.Println("  --password <pwd>   Optional auth-file password")
 	fmt.Println("  --profile <name>   Optional audible-cli profile")
+	fmt.Println("  --status-table     For status command: show full table")
 	fmt.Println()
 	fmt.Println("If audible-cli is not configured yet, the program will ask to run `audible quickstart`.")
 	fmt.Println("If --password is omitted, audible-cli will use an unencrypted auth file or prompt when needed.")
@@ -262,11 +321,6 @@ func doConvert(cfg config) error {
 		return fmt.Errorf("ffmpeg was not found on PATH; install ffmpeg or use the Docker image for conversion")
 	}
 
-	activationBytes, err := getActivationBytes(cfg)
-	if err != nil {
-		return err
-	}
-
 	aaxFiles, err := filepath.Glob(filepath.Join(cfg.MediaDir, "*.aax"))
 	if err != nil {
 		return fmt.Errorf("failed to list .aax files: %w", err)
@@ -276,12 +330,17 @@ func doConvert(cfg config) error {
 		return fmt.Errorf("failed to list .aaxc files: %w", err)
 	}
 
-	if len(aaxFiles) == 0 {
-		fmt.Println("No .aax files found to convert")
-		if len(aaxcFiles) > 0 {
-			fmt.Fprintf(os.Stderr, "Found %d .aaxc file(s); automatic .m4b conversion currently only supports .aax files.\n", len(aaxcFiles))
-		}
+	if len(aaxFiles) == 0 && len(aaxcFiles) == 0 {
+		fmt.Println("No .aax or .aaxc files found to convert")
 		return nil
+	}
+
+	activationBytes := ""
+	if len(aaxFiles) > 0 {
+		activationBytes, err = getActivationBytes(cfg)
+		if err != nil {
+			return err
+		}
 	}
 
 	failed := 0
@@ -306,9 +365,36 @@ func doConvert(cfg config) error {
 		}
 	}
 
-	if len(aaxcFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "Found %d .aaxc file(s); automatic .m4b conversion currently only supports .aax files.\n", len(aaxcFiles))
+	for _, inputPath := range aaxcFiles {
+		outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".m4b"
+		voucherPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".voucher"
+
+		key, iv, keyErr := loadVoucherKeyIV(voucherPath)
+		if keyErr != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "Failed to load voucher for %s: %v\n", filepath.Base(inputPath), keyErr)
+			continue
+		}
+
+		fmt.Printf("Converting %s -> %s\n", filepath.Base(inputPath), filepath.Base(outputPath))
+		err := runCmd(
+			"ffmpeg",
+			"-y",
+			"-loglevel", "error",
+			"-stats",
+			"-audible_key", key,
+			"-audible_iv", iv,
+			"-i", inputPath,
+			"-vn",
+			"-c:a", "copy",
+			outputPath,
+		)
+		if err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", filepath.Base(inputPath), err)
+		}
 	}
+
 	if failed > 0 {
 		return fmt.Errorf("failed to convert %d file(s)", failed)
 	}
@@ -342,6 +428,20 @@ func extractActivationBytes(output string) string {
 }
 
 func parseLibraryJSON(filename string) ([]string, error) {
+	items, err := parseLibraryItemsJSON(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	asins := make([]string, 0, len(items))
+	for _, item := range items {
+		asins = append(asins, item.ASIN)
+	}
+
+	return asins, nil
+}
+
+func parseLibraryItemsJSON(filename string) ([]libraryItem, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
@@ -353,7 +453,7 @@ func parseLibraryJSON(filename string) ([]string, error) {
 	}
 
 	seen := make(map[string]struct{}, len(items))
-	var asins []string
+	filtered := make([]libraryItem, 0, len(items))
 	for _, item := range items {
 		asin := strings.TrimSpace(item.ASIN)
 		if asin == "" {
@@ -363,10 +463,31 @@ func parseLibraryJSON(filename string) ([]string, error) {
 			continue
 		}
 		seen[asin] = struct{}{}
-		asins = append(asins, asin)
+		item.ASIN = asin
+		filtered = append(filtered, item)
 	}
 
-	return asins, nil
+	return filtered, nil
+}
+
+func loadVoucherKeyIV(voucherPath string) (string, string, error) {
+	data, err := os.ReadFile(voucherPath)
+	if err != nil {
+		return "", "", err
+	}
+
+	var voucher voucherFile
+	if err := json.Unmarshal(data, &voucher); err != nil {
+		return "", "", err
+	}
+
+	key := strings.TrimSpace(voucher.ContentLicense.LicenseResponse.Key)
+	iv := strings.TrimSpace(voucher.ContentLicense.LicenseResponse.IV)
+	if key == "" || iv == "" {
+		return "", "", fmt.Errorf("voucher does not contain a valid key/iv")
+	}
+
+	return key, iv, nil
 }
 
 func doClean(cfg config) error {
@@ -387,6 +508,325 @@ func doClean(cfg config) error {
 				return fmt.Errorf("failed to remove %s: %w", name, err)
 			}
 		}
+	}
+
+	return nil
+}
+
+func doStatus(cfg config) error {
+	items, err := exportLibraryItems(cfg)
+	if err != nil {
+		return err
+	}
+
+	downloaded, err := loadDownloadedAsins()
+	if err != nil {
+		return fmt.Errorf("failed to load downloaded ASINs: %w", err)
+	}
+	downloadedSet := make(map[string]struct{}, len(downloaded))
+	for _, asin := range downloaded {
+		downloadedSet[asin] = struct{}{}
+	}
+
+	state, err := scanMediaState(cfg.MediaDir)
+	if err != nil {
+		return err
+	}
+	asinMediaIndex, err := buildASINMediaIndex(cfg.MediaDir)
+	if err != nil {
+		return err
+	}
+
+	librarySet := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		asin := strings.TrimSpace(item.ASIN)
+		if asin == "" {
+			continue
+		}
+		librarySet[asin] = struct{}{}
+	}
+
+	trackedInLibrary := 0
+	for _, asin := range downloaded {
+		if _, ok := librarySet[asin]; ok {
+			trackedInLibrary++
+		}
+	}
+
+	remaining := len(librarySet) - trackedInLibrary
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	fmt.Println("Library status")
+	fmt.Printf("Total in Audible library: %d\n", len(librarySet))
+	fmt.Printf("Tracked downloaded ASINs: %d\n", len(downloaded))
+	fmt.Printf("Tracked and still in library: %d\n", trackedInLibrary)
+	fmt.Printf("Remaining to download: %d\n", remaining)
+	fmt.Printf("Ready to listen (.m4b): %d\n", len(state.Ready))
+	fmt.Printf("Needs conversion (.aax): %d\n", len(state.NeedsAAX))
+	fmt.Printf("Needs conversion (.aaxc): %d\n", len(state.NeedsAAXC))
+
+	if cfg.StatusTable {
+		rows := make([][3]string, 0, len(items))
+		for _, item := range items {
+			asin := strings.TrimSpace(item.ASIN)
+			if asin == "" {
+				continue
+			}
+			_, tracked := downloadedSet[asin]
+			bookState := computeBookState(tracked, asinMediaIndex[asin])
+			rows = append(rows, [3]string{asin, strings.TrimSpace(item.Title), bookState})
+		}
+
+		fmt.Println()
+		fmt.Println("Books")
+		printStatusTable(rows)
+	}
+
+	return nil
+}
+
+func exportLibraryItems(cfg config) ([]libraryItem, error) {
+	libraryFile, err := os.CreateTemp("", "auto-audible-library-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temporary library export file: %w", err)
+	}
+	libraryPath := libraryFile.Name()
+	if err := libraryFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temporary library export file: %w", err)
+	}
+	defer os.Remove(libraryPath)
+
+	if err := runCmd("audible", audibleArgs(cfg, "library", "export", "--format", "json", "--output", libraryPath)...); err != nil {
+		return nil, fmt.Errorf("failed to export library: %w", err)
+	}
+
+	items, err := parseLibraryItemsJSON(libraryPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse library export: %w", err)
+	}
+
+	return items, nil
+}
+
+func scanMediaState(mediaDir string) (mediaState, error) {
+	files, err := os.ReadDir(mediaDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return mediaState{}, nil
+		}
+		return mediaState{}, fmt.Errorf("failed to read media directory: %w", err)
+	}
+
+	hasM4B := map[string]struct{}{}
+	hasAAX := map[string]struct{}{}
+	hasAAXC := map[string]struct{}{}
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+		name := file.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		base := strings.TrimSuffix(name, filepath.Ext(name))
+		if base == "" {
+			continue
+		}
+
+		switch ext {
+		case ".m4b":
+			hasM4B[base] = struct{}{}
+		case ".aax":
+			hasAAX[base] = struct{}{}
+		case ".aaxc":
+			hasAAXC[base] = struct{}{}
+		}
+	}
+
+	state := mediaState{}
+	for base := range hasM4B {
+		state.Ready = append(state.Ready, base)
+	}
+	for base := range hasAAX {
+		if _, ok := hasM4B[base]; ok {
+			continue
+		}
+		state.NeedsAAX = append(state.NeedsAAX, base)
+	}
+	for base := range hasAAXC {
+		if _, ok := hasM4B[base]; ok {
+			continue
+		}
+		state.NeedsAAXC = append(state.NeedsAAXC, base)
+	}
+
+	sort.Strings(state.Ready)
+	sort.Strings(state.NeedsAAX)
+	sort.Strings(state.NeedsAAXC)
+
+	return state, nil
+}
+
+func buildASINMediaIndex(mediaDir string) (map[string]bookMediaInfo, error) {
+	index := map[string]bookMediaInfo{}
+
+	vouchers, err := filepath.Glob(filepath.Join(mediaDir, "*.voucher"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list voucher files: %w", err)
+	}
+	for _, voucherPath := range vouchers {
+		data, readErr := os.ReadFile(voucherPath)
+		if readErr != nil {
+			continue
+		}
+		var voucher voucherFile
+		if unmarshalErr := json.Unmarshal(data, &voucher); unmarshalErr != nil {
+			continue
+		}
+		asin := strings.TrimSpace(voucher.ContentLicense.ASIN)
+		if asin == "" {
+			continue
+		}
+		format := strings.TrimSpace(voucher.ContentLicense.ContentMetadata.ContentReference.ContentFormat)
+		base := strings.TrimSuffix(filepath.Base(voucherPath), filepath.Ext(voucherPath))
+		candidates := []string{base}
+		if trimmed := trimCodecSuffix(base, format); trimmed != "" && trimmed != base {
+			candidates = append(candidates, trimmed)
+		}
+		info := index[asin]
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			info = mergeMediaInfo(info, mediaInfoForBase(mediaDir, candidate))
+		}
+		index[asin] = info
+	}
+
+	chapters, err := filepath.Glob(filepath.Join(mediaDir, "*-chapters.json"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list chapter metadata files: %w", err)
+	}
+	for _, chapterPath := range chapters {
+		data, readErr := os.ReadFile(chapterPath)
+		if readErr != nil {
+			continue
+		}
+		var chapter chapterFile
+		if unmarshalErr := json.Unmarshal(data, &chapter); unmarshalErr != nil {
+			continue
+		}
+		asin := strings.TrimSpace(chapter.ContentMetadata.ContentReference.ASIN)
+		if asin == "" {
+			continue
+		}
+		format := strings.TrimSpace(chapter.ContentMetadata.ContentReference.ContentFormat)
+		base := strings.TrimSuffix(filepath.Base(chapterPath), "-chapters.json")
+		candidates := []string{base}
+		if format != "" {
+			candidates = append(candidates, base+"-"+format)
+		}
+		info := index[asin]
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			info = mergeMediaInfo(info, mediaInfoForBase(mediaDir, candidate))
+		}
+		index[asin] = info
+	}
+
+	return index, nil
+}
+
+func mergeMediaInfo(a, b bookMediaInfo) bookMediaInfo {
+	return bookMediaInfo{
+		HasM4B:  a.HasM4B || b.HasM4B,
+		HasAAX:  a.HasAAX || b.HasAAX,
+		HasAAXC: a.HasAAXC || b.HasAAXC,
+	}
+}
+
+func mediaInfoForBase(mediaDir, base string) bookMediaInfo {
+	return bookMediaInfo{
+		HasM4B:  fileExists(filepath.Join(mediaDir, base+".m4b")),
+		HasAAX:  fileExists(filepath.Join(mediaDir, base+".aax")),
+		HasAAXC: fileExists(filepath.Join(mediaDir, base+".aaxc")),
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func trimCodecSuffix(base, codec string) string {
+	codec = strings.TrimSpace(codec)
+	if codec == "" {
+		return base
+	}
+	suffix := "-" + codec
+	if strings.HasSuffix(base, suffix) {
+		return strings.TrimSuffix(base, suffix)
+	}
+	return base
+}
+
+func computeBookState(tracked bool, info bookMediaInfo) string {
+	if info.HasM4B {
+		return "ready"
+	}
+	if info.HasAAX {
+		return "needs_convert_aax"
+	}
+	if info.HasAAXC {
+		return "needs_convert_aaxc"
+	}
+	if tracked {
+		return "tracked_no_media"
+	}
+	return "not_downloaded"
+}
+
+func printStatusTable(rows [][3]string) {
+	asinWidth := len("ASIN")
+	titleWidth := len("Title")
+	stateWidth := len("State")
+	for _, row := range rows {
+		if len(row[0]) > asinWidth {
+			asinWidth = len(row[0])
+		}
+		if len(row[1]) > titleWidth {
+			titleWidth = len(row[1])
+		}
+		if len(row[2]) > stateWidth {
+			stateWidth = len(row[2])
+		}
+	}
+
+	fmt.Printf("%-*s  %-*s  %-*s\n", asinWidth, "ASIN", titleWidth, "Title", stateWidth, "State")
+	for _, row := range rows {
+		fmt.Printf("%-*s  %-*s  %-*s\n", asinWidth, row[0], titleWidth, row[1], stateWidth, row[2])
+	}
+}
+
+func printReadySummary(mediaDir string) error {
+	state, err := scanMediaState(mediaDir)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\nReady-to-listen summary for %s\n", mediaDir)
+	fmt.Printf("Ready (.m4b): %d\n", len(state.Ready))
+	for _, title := range state.Ready {
+		fmt.Printf("  - %s\n", title)
+	}
+
+	fmt.Printf("Needs conversion (.aax): %d\n", len(state.NeedsAAX))
+	fmt.Printf("Needs conversion (.aaxc): %d\n", len(state.NeedsAAXC))
+	for _, title := range state.NeedsAAXC {
+		fmt.Printf("  - %s\n", title)
 	}
 
 	return nil

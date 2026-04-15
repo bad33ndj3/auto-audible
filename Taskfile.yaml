@@ -20,15 +20,20 @@ tasks:
     cmds:
       - go run . convert {{.CLI_ARGS}}
 
-  decrypt:
-    desc: Alias for convert on the host
-    cmds:
-      - go run . decrypt {{.CLI_ARGS}}
-
   clean:
     desc: Remove intermediate media files on the host
     cmds:
       - go run . clean {{.CLI_ARGS}}
+
+  ready:
+    desc: List ready-to-listen and pending books
+    cmds:
+      - go run . ready {{.CLI_ARGS}}
+
+  status:
+    desc: Show library and media status summary
+    cmds:
+      - go run . status {{.CLI_ARGS}}
 
   all:
     desc: Download and convert on the host
