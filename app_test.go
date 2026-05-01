@@ -218,10 +218,11 @@ func TestDownload_SkipsAlreadyDownloaded(t *testing.T) {
 		},
 	}
 	app := &App{
-		Audible:  audible,
-		FS:       fs,
-		Store:    store,
-		MediaDir: "media",
+		Audible:         audible,
+		FS:              fs,
+		Store:           store,
+		MediaDir:        "media",
+		DownloadWorkers: 1,
 	}
 
 	if err := app.Download(context.Background()); err != nil {
@@ -248,10 +249,11 @@ func TestDownload_CreatesSeriesDirectory(t *testing.T) {
 		},
 	}
 	app := &App{
-		Audible:  audible,
-		FS:       fs,
-		Store:    store,
-		MediaDir: "media",
+		Audible:         audible,
+		FS:              fs,
+		Store:           store,
+		MediaDir:        "media",
+		DownloadWorkers: 1,
 	}
 
 	if err := app.Download(context.Background()); err != nil {
@@ -277,10 +279,11 @@ func TestDownload_HandlesDownloadErrorGracefully(t *testing.T) {
 		downloadErr: errors.New("network error"),
 	}
 	app := &App{
-		Audible:  audible,
-		FS:       fs,
-		Store:    store,
-		MediaDir: "media",
+		Audible:         audible,
+		FS:              fs,
+		Store:           store,
+		MediaDir:        "media",
+		DownloadWorkers: 1,
 	}
 
 	if err := app.Download(context.Background()); err != nil {

@@ -4,7 +4,8 @@
     "go@1.23.4",
     "ffmpeg",
     "audible-cli",
-    "go-task"
+    "go-task",
+    "git"
   ],
   "shell": {
     "init_hook": [

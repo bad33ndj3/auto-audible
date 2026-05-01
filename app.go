@@ -9,18 +9,20 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // App orchestrates the audible download and conversion workflow.
 type App struct {
-	Audible     AudibleService
-	Converter   MediaConverter
-	FS          FileSystem
-	Store       ASINStore
-	Prompter    Prompter
-	MediaDir    string
-	lookPath    func(string) (string, error)
-	interactive func() bool
+	Audible         AudibleService
+	Converter       MediaConverter
+	FS              FileSystem
+	Store           ASINStore
+	Prompter        Prompter
+	MediaDir        string
+	DownloadWorkers int
+	lookPath        func(string) (string, error)
+	interactive     func() bool
 }
 
 func (a *App) EnsureAudibleConfigured(ctx context.Context) error {
@@ -93,6 +95,13 @@ func (a *App) Download(ctx context.Context) error {
 		downloadedSet[asin] = struct{}{}
 	}
 
+	type job struct {
+		item      Book
+		outputDir string
+		hasSeries bool
+	}
+
+	var jobs []job
 	for _, item := range items {
 		asin := item.ASIN
 		if _, ok := downloadedSet[asin]; ok {
@@ -111,22 +120,52 @@ func (a *App) Download(ctx context.Context) error {
 			outputDir = seriesDir
 		}
 
-		fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
-		if err := a.Audible.DownloadBook(ctx, asin, outputDir); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
-			continue
-		}
-
-		if err := a.renameDownloadedFiles(outputDir, asin, item.Title, hasSeries, item.SeriesSequence); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
-		}
-
-		downloaded = append(downloaded, asin)
-		downloadedSet[asin] = struct{}{}
-		if err := a.Store.Save(downloaded); err != nil {
-			return fmt.Errorf("failed to save downloaded ASINs: %w", err)
-		}
+		jobs = append(jobs, job{item: item, outputDir: outputDir, hasSeries: hasSeries})
 	}
+
+	workers := a.DownloadWorkers
+	if workers <= 0 {
+		workers = 4
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	jobCh := make(chan job)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobCh {
+				item := j.item
+				asin := item.ASIN
+
+				fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
+				if err := a.Audible.DownloadBook(ctx, asin, j.outputDir); err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
+					continue
+				}
+
+				if err := a.renameDownloadedFiles(j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
+				}
+
+				mu.Lock()
+				downloaded = append(downloaded, asin)
+				downloadedSet[asin] = struct{}{}
+				if err := a.Store.Save(downloaded); err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+
+	for _, j := range jobs {
+		jobCh <- j
+	}
+	close(jobCh)
+	wg.Wait()
 
 	return nil
 }

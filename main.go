@@ -18,6 +18,7 @@ type globalFlags struct {
 	MediaDir string
 	Password string
 	Profile  string
+	Workers  int
 }
 
 // cmdSpec defines a single CLI command.
@@ -75,6 +76,7 @@ func run(ctx context.Context, args []string) error {
 	fs.StringVar(&globals.MediaDir, "media-dir", "media", "media directory")
 	fs.StringVar(&globals.Password, "password", "", "audible auth-file password")
 	fs.StringVar(&globals.Profile, "profile", "", "audible-cli profile")
+	fs.IntVar(&globals.Workers, "workers", 4, "number of parallel downloads")
 
 	if cmd.Setup != nil {
 		cmd.Setup(fs)
@@ -88,12 +90,13 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	app := &App{
-		Audible:   newAudibleCLI(globals.Profile, globals.Password),
-		Converter: newFFmpegConverter(),
-		FS:        newOSFS(),
-		Store:     newJSONASINStore(downloadedAsinsPath),
-		Prompter:  newStdinPrompter(),
-		MediaDir:  globals.MediaDir,
+		Audible:         newAudibleCLI(globals.Profile, globals.Password),
+		Converter:       newFFmpegConverter(),
+		FS:              newOSFS(),
+		Store:           newJSONASINStore(downloadedAsinsPath),
+		Prompter:        newStdinPrompter(),
+		MediaDir:        globals.MediaDir,
+		DownloadWorkers: globals.Workers,
 	}
 
 	if cmd.NeedsAudible {
@@ -189,6 +192,7 @@ func printUsage(commands map[string]cmdSpec) {
 	fmt.Fprintln(os.Stderr, "  -media-dir string    media directory (default \"media\")")
 	fmt.Fprintln(os.Stderr, "  -password string     audible auth-file password")
 	fmt.Fprintln(os.Stderr, "  -profile string      audible-cli profile")
+	fmt.Fprintln(os.Stderr, "  -workers int         number of parallel downloads (default 4)")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Run 'auto-audible help <command>' for details.")
 }
@@ -201,6 +205,7 @@ func printCommandHelp(cmd cmdSpec) {
 	fs.String("media-dir", "media", "media directory")
 	fs.String("password", "", "audible auth-file password")
 	fs.String("profile", "", "audible-cli profile")
+	fs.Int("workers", 4, "number of parallel downloads")
 	if cmd.Setup != nil {
 		cmd.Setup(fs)
 	}
