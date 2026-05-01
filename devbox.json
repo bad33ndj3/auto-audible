@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.0/.schema/devbox.schema.json",
+  "packages": [
+    "go@1.23.4",
+    "ffmpeg",
+    "audible-cli",
+    "go-task"
+  ],
+  "shell": {
+    "init_hook": [
+      "echo 'Welcome to auto-audible devbox!'",
+      "go version",
+      "ffmpeg -version | head -n 1",
+      "audible --version",
+      "task --version"
+    ]
+  }
+}
