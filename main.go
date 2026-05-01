@@ -19,6 +19,58 @@ import (
 const downloadedAsinsPath = "downloaded_asins.json"
 
 var activationBytesPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}$`)
+var whitespacePattern = regexp.MustCompile(`\s+`)
+
+func sanitizeFileName(name string) string {
+	replacer := strings.NewReplacer(
+		"/", "-",
+		"\\", "-",
+		":", "-",
+		"*", "",
+		"?", "",
+		"\"", "'",
+		"<", "",
+		">", "",
+		"|", "-",
+	)
+	name = replacer.Replace(name)
+	name = whitespacePattern.ReplaceAllString(name, " ")
+	name = strings.TrimSpace(name)
+	return name
+}
+
+func formatPrefix(seq interface{}) string {
+	if seq == nil {
+		return ""
+	}
+	var n int
+	switch v := seq.(type) {
+	case float64:
+		n = int(v)
+	case string:
+		fmt.Sscanf(v, "%d", &n)
+	default:
+		return ""
+	}
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%02d - ", n)
+}
+
+func findFilesRecursive(root, ext string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.ToLower(filepath.Ext(path)) == ext {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files, err
+}
 
 type config struct {
 	MediaDir    string
@@ -28,8 +80,10 @@ type config struct {
 }
 
 type libraryItem struct {
-	ASIN  string `json:"asin"`
-	Title string `json:"title"`
+	ASIN           string      `json:"asin"`
+	Title          string      `json:"title"`
+	SeriesTitle    string      `json:"series_title"`
+	SeriesSequence interface{} `json:"series_sequence"`
 }
 
 type mediaState struct {
@@ -255,12 +309,12 @@ func doDownload(cfg config) error {
 		return fmt.Errorf("failed to export library: %w", err)
 	}
 
-	asins, err := parseLibraryJSON(libraryPath)
+	items, err := parseLibraryItemsJSON(libraryPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse library export: %w", err)
 	}
 
-	if len(asins) == 0 {
+	if len(items) == 0 {
 		fmt.Println("No library items found in Audible export")
 		return nil
 	}
@@ -275,20 +329,33 @@ func doDownload(cfg config) error {
 		downloadedSet[asin] = struct{}{}
 	}
 
-	for _, asin := range asins {
+	for _, item := range items {
+		asin := item.ASIN
 		if _, ok := downloadedSet[asin]; ok {
 			fmt.Printf("ASIN %s already downloaded, skipping.\n", asin)
 			continue
 		}
 
-		fmt.Printf("Downloading new book with ASIN: %s\n", asin)
+		outputDir := cfg.MediaDir
+		seriesTitle := strings.TrimSpace(item.SeriesTitle)
+		hasSeries := seriesTitle != ""
+		if hasSeries {
+			seriesDir := filepath.Join(cfg.MediaDir, sanitizeFileName(seriesTitle))
+			if err := os.MkdirAll(seriesDir, 0o755); err != nil {
+				return fmt.Errorf("failed to create series directory: %w", err)
+			}
+			outputDir = seriesDir
+		}
+
+		fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
 		err := runCmd(
 			"audible",
 			audibleArgs(
 				cfg,
 				"download",
 				"--asin", asin,
-				"--output-dir", cfg.MediaDir,
+				"--output-dir", outputDir,
+				"--filename-mode", "asin_only",
 				"-y",
 				"--ignore-errors",
 				"--aax-fallback",
@@ -306,10 +373,79 @@ func doDownload(cfg config) error {
 			continue
 		}
 
+		if err := renameDownloadedFiles(outputDir, asin, item.Title, hasSeries, item.SeriesSequence); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
+		}
+
 		downloaded = append(downloaded, asin)
 		downloadedSet[asin] = struct{}{}
 		if err := saveDownloadedAsins(downloaded); err != nil {
 			return fmt.Errorf("failed to save downloaded ASINs: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func renameDownloadedFiles(outputDir, asin, title string, hasSeries bool, seriesSeq interface{}) error {
+	files, err := os.ReadDir(outputDir)
+	if err != nil {
+		return err
+	}
+
+	prefix := ""
+	if hasSeries {
+		prefix = formatPrefix(seriesSeq)
+	}
+
+	sanitizedTitle := sanitizeFileName(title)
+
+	for _, file := range files {
+		name := file.Name()
+		base := strings.TrimSuffix(name, filepath.Ext(name))
+
+		if !strings.HasPrefix(base, asin) {
+			continue
+		}
+		if len(base) > len(asin) {
+			nextChar := base[len(asin)]
+			if nextChar != '_' && nextChar != '-' {
+				continue
+			}
+		}
+
+		ext := filepath.Ext(name)
+		suffix := ""
+		if len(base) > len(asin) {
+			suffix = base[len(asin):]
+		}
+
+		newName := prefix + sanitizedTitle + suffix + ext
+
+		newPath := filepath.Join(outputDir, newName)
+		if fileExists(newPath) && name != newName {
+			counter := 1
+			for {
+				altName := prefix + sanitizedTitle + fmt.Sprintf("_%d", counter) + ext
+				altPath := filepath.Join(outputDir, altName)
+				if !fileExists(altPath) {
+					newName = altName
+					newPath = altPath
+					break
+				}
+				counter++
+				if counter > 100 {
+					return fmt.Errorf("could not find unique name for %s", name)
+				}
+			}
+		}
+
+		oldPath := filepath.Join(outputDir, name)
+		if name == newName {
+			continue
+		}
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return fmt.Errorf("failed to rename %s to %s: %w", name, newName, err)
 		}
 	}
 
@@ -321,11 +457,11 @@ func doConvert(cfg config) error {
 		return fmt.Errorf("ffmpeg was not found on PATH; install ffmpeg or use the Docker image for conversion")
 	}
 
-	aaxFiles, err := filepath.Glob(filepath.Join(cfg.MediaDir, "*.aax"))
+	aaxFiles, err := findFilesRecursive(cfg.MediaDir, ".aax")
 	if err != nil {
 		return fmt.Errorf("failed to list .aax files: %w", err)
 	}
-	aaxcFiles, err := filepath.Glob(filepath.Join(cfg.MediaDir, "*.aaxc"))
+	aaxcFiles, err := findFilesRecursive(cfg.MediaDir, ".aaxc")
 	if err != nil {
 		return fmt.Errorf("failed to list .aaxc files: %w", err)
 	}
@@ -346,7 +482,7 @@ func doConvert(cfg config) error {
 	failed := 0
 	for _, inputPath := range aaxFiles {
 		outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".m4b"
-		fmt.Printf("Converting %s -> %s\n", filepath.Base(inputPath), filepath.Base(outputPath))
+		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
 
 		err := runCmd(
 			"ffmpeg",
@@ -361,7 +497,7 @@ func doConvert(cfg config) error {
 		)
 		if err != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", filepath.Base(inputPath), err)
+			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
 		}
 	}
 
@@ -372,11 +508,11 @@ func doConvert(cfg config) error {
 		key, iv, keyErr := loadVoucherKeyIV(voucherPath)
 		if keyErr != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "Failed to load voucher for %s: %v\n", filepath.Base(inputPath), keyErr)
+			fmt.Fprintf(os.Stderr, "Failed to load voucher for %s: %v\n", inputPath, keyErr)
 			continue
 		}
 
-		fmt.Printf("Converting %s -> %s\n", filepath.Base(inputPath), filepath.Base(outputPath))
+		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
 		err := runCmd(
 			"ffmpeg",
 			"-y",
@@ -391,7 +527,7 @@ func doConvert(cfg config) error {
 		)
 		if err != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", filepath.Base(inputPath), err)
+			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
 		}
 	}
 
@@ -491,25 +627,29 @@ func loadVoucherKeyIV(voucherPath string) (string, string, error) {
 }
 
 func doClean(cfg config) error {
-	files, err := os.ReadDir(cfg.MediaDir)
-	if err != nil {
-		return fmt.Errorf("failed to read media directory: %w", err)
-	}
-
-	for _, file := range files {
-		name := file.Name()
+	err := filepath.WalkDir(cfg.MediaDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
 		if strings.HasSuffix(name, ".aaxc") ||
 			strings.HasSuffix(name, ".aax") ||
 			strings.HasSuffix(name, ".jpg") ||
 			strings.HasSuffix(name, ".json") ||
 			strings.HasSuffix(name, ".voucher") ||
 			strings.HasSuffix(name, ".pdf") {
-			if err := os.Remove(filepath.Join(cfg.MediaDir, name)); err != nil {
-				return fmt.Errorf("failed to remove %s: %w", name, err)
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("failed to remove %s: %w", path, err)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to clean media directory: %w", err)
 	}
-
 	return nil
 }
 
@@ -611,27 +751,23 @@ func exportLibraryItems(cfg config) ([]libraryItem, error) {
 }
 
 func scanMediaState(mediaDir string) (mediaState, error) {
-	files, err := os.ReadDir(mediaDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return mediaState{}, nil
-		}
-		return mediaState{}, fmt.Errorf("failed to read media directory: %w", err)
-	}
-
 	hasM4B := map[string]struct{}{}
 	hasAAX := map[string]struct{}{}
 	hasAAXC := map[string]struct{}{}
 
-	for _, file := range files {
-		if file.IsDir() {
-			continue
+	err := filepath.WalkDir(mediaDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		name := file.Name()
+		if d.IsDir() {
+			return nil
+		}
+		relPath, _ := filepath.Rel(mediaDir, path)
+		name := d.Name()
 		ext := strings.ToLower(filepath.Ext(name))
-		base := strings.TrimSuffix(name, filepath.Ext(name))
+		base := strings.TrimSuffix(relPath, ext)
 		if base == "" {
-			continue
+			return nil
 		}
 
 		switch ext {
@@ -642,6 +778,13 @@ func scanMediaState(mediaDir string) (mediaState, error) {
 		case ".aaxc":
 			hasAAXC[base] = struct{}{}
 		}
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return mediaState{}, nil
+		}
+		return mediaState{}, fmt.Errorf("failed to read media directory: %w", err)
 	}
 
 	state := mediaState{}
@@ -671,25 +814,28 @@ func scanMediaState(mediaDir string) (mediaState, error) {
 func buildASINMediaIndex(mediaDir string) (map[string]bookMediaInfo, error) {
 	index := map[string]bookMediaInfo{}
 
-	vouchers, err := filepath.Glob(filepath.Join(mediaDir, "*.voucher"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to list voucher files: %w", err)
-	}
-	for _, voucherPath := range vouchers {
-		data, readErr := os.ReadFile(voucherPath)
+	err := filepath.WalkDir(mediaDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".voucher") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			continue
+			return nil
 		}
 		var voucher voucherFile
 		if unmarshalErr := json.Unmarshal(data, &voucher); unmarshalErr != nil {
-			continue
+			return nil
 		}
 		asin := strings.TrimSpace(voucher.ContentLicense.ASIN)
 		if asin == "" {
-			continue
+			return nil
 		}
 		format := strings.TrimSpace(voucher.ContentLicense.ContentMetadata.ContentReference.ContentFormat)
-		base := strings.TrimSuffix(filepath.Base(voucherPath), filepath.Ext(voucherPath))
+		dir := filepath.Dir(path)
+		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		candidates := []string{base}
 		if trimmed := trimCodecSuffix(base, format); trimmed != "" && trimmed != base {
 			candidates = append(candidates, trimmed)
@@ -699,30 +845,37 @@ func buildASINMediaIndex(mediaDir string) (map[string]bookMediaInfo, error) {
 			if candidate == "" {
 				continue
 			}
-			info = mergeMediaInfo(info, mediaInfoForBase(mediaDir, candidate))
+			info = mergeMediaInfo(info, mediaInfoForBase(dir, candidate))
 		}
 		index[asin] = info
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list voucher files: %w", err)
 	}
 
-	chapters, err := filepath.Glob(filepath.Join(mediaDir, "*-chapters.json"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to list chapter metadata files: %w", err)
-	}
-	for _, chapterPath := range chapters {
-		data, readErr := os.ReadFile(chapterPath)
+	err = filepath.WalkDir(mediaDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), "-chapters.json") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			continue
+			return nil
 		}
 		var chapter chapterFile
 		if unmarshalErr := json.Unmarshal(data, &chapter); unmarshalErr != nil {
-			continue
+			return nil
 		}
 		asin := strings.TrimSpace(chapter.ContentMetadata.ContentReference.ASIN)
 		if asin == "" {
-			continue
+			return nil
 		}
 		format := strings.TrimSpace(chapter.ContentMetadata.ContentReference.ContentFormat)
-		base := strings.TrimSuffix(filepath.Base(chapterPath), "-chapters.json")
+		dir := filepath.Dir(path)
+		base := strings.TrimSuffix(filepath.Base(path), "-chapters.json")
 		candidates := []string{base}
 		if format != "" {
 			candidates = append(candidates, base+"-"+format)
@@ -732,9 +885,13 @@ func buildASINMediaIndex(mediaDir string) (map[string]bookMediaInfo, error) {
 			if candidate == "" {
 				continue
 			}
-			info = mergeMediaInfo(info, mediaInfoForBase(mediaDir, candidate))
+			info = mergeMediaInfo(info, mediaInfoForBase(dir, candidate))
 		}
 		index[asin] = info
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list chapter metadata files: %w", err)
 	}
 
 	return index, nil
@@ -748,11 +905,11 @@ func mergeMediaInfo(a, b bookMediaInfo) bookMediaInfo {
 	}
 }
 
-func mediaInfoForBase(mediaDir, base string) bookMediaInfo {
+func mediaInfoForBase(dir, base string) bookMediaInfo {
 	return bookMediaInfo{
-		HasM4B:  fileExists(filepath.Join(mediaDir, base+".m4b")),
-		HasAAX:  fileExists(filepath.Join(mediaDir, base+".aax")),
-		HasAAXC: fileExists(filepath.Join(mediaDir, base+".aaxc")),
+		HasM4B:  fileExists(filepath.Join(dir, base+".m4b")),
+		HasAAX:  fileExists(filepath.Join(dir, base+".aax")),
+		HasAAXC: fileExists(filepath.Join(dir, base+".aaxc")),
 	}
 }
 
@@ -819,14 +976,17 @@ func printReadySummary(mediaDir string) error {
 
 	fmt.Printf("\nReady-to-listen summary for %s\n", mediaDir)
 	fmt.Printf("Ready (.m4b): %d\n", len(state.Ready))
-	for _, title := range state.Ready {
-		fmt.Printf("  - %s\n", title)
+	for _, path := range state.Ready {
+		fmt.Printf("  - %s\n", path)
 	}
 
 	fmt.Printf("Needs conversion (.aax): %d\n", len(state.NeedsAAX))
+	for _, path := range state.NeedsAAX {
+		fmt.Printf("  - %s\n", path)
+	}
 	fmt.Printf("Needs conversion (.aaxc): %d\n", len(state.NeedsAAXC))
-	for _, title := range state.NeedsAAXC {
-		fmt.Printf("  - %s\n", title)
+	for _, path := range state.NeedsAAXC {
+		fmt.Printf("  - %s\n", path)
 	}
 
 	return nil

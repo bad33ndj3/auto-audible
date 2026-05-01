@@ -60,9 +60,15 @@ func TestScanMediaState(t *testing.T) {
 		"Locked_Title.aaxc",
 		"Ready_Book.aax",
 		"Ready_Book.aaxc",
+		"series/Sub_Book.m4b",
+		"series/Sub_Needs.aax",
 	}
 	for _, name := range files {
-		if err := os.WriteFile(filepath.Join(mediaDir, name), []byte("x"), 0o644); err != nil {
+		path := filepath.Join(mediaDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create dir for %s: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
 			t.Fatalf("create media file %s: %v", name, err)
 		}
 	}
@@ -72,10 +78,10 @@ func TestScanMediaState(t *testing.T) {
 		t.Fatalf("scanMediaState returned error: %v", err)
 	}
 
-	if !reflect.DeepEqual(state.Ready, []string{"Ready_Book"}) {
+	if !reflect.DeepEqual(state.Ready, []string{"Ready_Book", "series/Sub_Book"}) {
 		t.Fatalf("unexpected ready list: %v", state.Ready)
 	}
-	if !reflect.DeepEqual(state.NeedsAAX, []string{"Needs_Conversion"}) {
+	if !reflect.DeepEqual(state.NeedsAAX, []string{"Needs_Conversion", "series/Sub_Needs"}) {
 		t.Fatalf("unexpected needs-aax list: %v", state.NeedsAAX)
 	}
 	if !reflect.DeepEqual(state.NeedsAAXC, []string{"Locked_Title"}) {
@@ -131,5 +137,108 @@ func TestComputeBookState(t *testing.T) {
 				t.Fatalf("unexpected state: got %q want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSanitizeFileName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Hello World", "Hello World"},
+		{"Book: Title", "Book- Title"},
+		{"A/B Testing", "A-B Testing"},
+		{"File*Name?", "FileName"},
+		{"  Multiple   Spaces  ", "Multiple Spaces"},
+	}
+
+	for _, tt := range tests {
+		got := sanitizeFileName(tt.input)
+		if got != tt.want {
+			t.Fatalf("sanitizeFileName(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestFormatPrefix(t *testing.T) {
+	tests := []struct {
+		seq  interface{}
+		want string
+	}{
+		{nil, ""},
+		{float64(1), "01 - "},
+		{float64(15), "15 - "},
+		{"3", "03 - "},
+		{float64(0), ""},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		got := formatPrefix(tt.seq)
+		if got != tt.want {
+			t.Fatalf("formatPrefix(%v) = %q, want %q", tt.seq, got, tt.want)
+		}
+	}
+}
+
+func TestRenameDownloadedFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	files := []string{
+		"B001.aax",
+		"B001.voucher",
+		"B001-chapters.json",
+		"B001.jpg",
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("create file %s: %v", name, err)
+		}
+	}
+
+	if err := renameDownloadedFiles(dir, "B001", "My Book: Title", false, nil); err != nil {
+		t.Fatalf("renameDownloadedFiles failed: %v", err)
+	}
+
+	expected := []string{
+		"My Book- Title.aax",
+		"My Book- Title.voucher",
+		"My Book- Title-chapters.json",
+		"My Book- Title.jpg",
+	}
+	for _, name := range expected {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected file %s to exist: %v", name, err)
+		}
+	}
+}
+
+func TestRenameDownloadedFilesWithSeries(t *testing.T) {
+	dir := t.TempDir()
+
+	files := []string{
+		"B002.aaxc",
+		"B002.voucher",
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("create file %s: %v", name, err)
+		}
+	}
+
+	if err := renameDownloadedFiles(dir, "B002", "Armor World", true, float64(15)); err != nil {
+		t.Fatalf("renameDownloadedFiles failed: %v", err)
+	}
+
+	expected := []string{
+		"15 - Armor World.aaxc",
+		"15 - Armor World.voucher",
+	}
+	for _, name := range expected {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected file %s to exist: %v", name, err)
+		}
 	}
 }

@@ -74,8 +74,29 @@ go run . download --profile audible
 1. `auto-audible` checks whether `audible-cli` is available and configured.
 2. It exports your Audible library as JSON.
 3. It downloads only ASINs that are not already listed in `downloaded_asins.json`.
-4. It asks `audible-cli` for activation bytes (for `.aax` conversion).
-5. It uses `ffmpeg` to convert `.aax` and `.aaxc` files to `.m4b`.
+4. Books that belong to a series are placed in a subfolder named after the series.
+5. Series books are renamed with a `## - ` prefix (e.g. `15 - Armor World.m4b`).
+6. It asks `audible-cli` for activation bytes (for `.aax` conversion).
+7. It uses `ffmpeg` to convert `.aax` and `.aaxc` files to `.m4b`.
+
+## Series folders
+
+When `download` detects a `series_title` in your Audible library, it creates a folder for that series under `media/` and downloads the book there. Files are renamed after download so they sort naturally:
+
+```
+media/
+├── Undying Mercenaries/
+│   ├── 01 - Steel World.m4b
+│   ├── 02 - Dust World.m4b
+│   └── 15 - Armor World.m4b
+├── Bobiverse/
+│   ├── 01 - We Are Legion (We Are Bob).m4b
+│   └── 02 - For We Are Many.m4b
+├── Project Hail Mary.m4b
+└── The Phoenix Project.m4b
+```
+
+Books without a series are kept at the top level of `media/`. All commands (`convert`, `clean`, `ready`, `status`) work recursively across the entire `media/` tree.
 
 ## AAXC notes
 

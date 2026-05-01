@@ -7,6 +7,7 @@ This repository contains a small Go wrapper around `audible-cli`. The wrapper is
 - checking whether `audible-cli` is installed and configured
 - exporting the Audible library as JSON
 - downloading only new ASINs
+- organising series books into subfolders with a `## - ` prefix
 - converting supported `.aax` downloads to `.m4b` with `ffmpeg`
 - cleaning intermediate files from the media directory
 
@@ -16,6 +17,8 @@ This repository contains a small Go wrapper around `audible-cli`. The wrapper is
 - missing Audible setup should be detected through `audible manage profile list`
 - interactive runs may offer to launch `audible quickstart`
 - conversion supports `.aax` (activation bytes) and `.aaxc` (voucher key/iv)
+- series books are placed in `media/<Series>/` and renamed with a `## - ` prefix
+- all media operations (`convert`, `clean`, `status`, `ready`) are recursive
 
 ## Files that matter
 
