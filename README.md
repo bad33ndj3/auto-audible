@@ -36,7 +36,7 @@ go run . convert  [--profile audible] [--password secret] [--media-dir media]
 go run . clean    [--media-dir media]
 go run . ready    [--media-dir media]
 go run . status   [--profile audible] [--password secret] [--media-dir media]
-go run . status   --status-table [--profile audible] [--password secret] [--media-dir media]
+go run . status   --table [--profile audible] [--password secret] [--media-dir media]
 go run . all      [--profile audible] [--password secret] [--media-dir media]
 ```
 
@@ -116,7 +116,7 @@ task docker-build
 task docker-all
 ```
 
-`status --status-table` lists every library title with one of these states:
+`status --table` lists every library title with one of these states:
 
 - `ready`
 - `needs_convert_aax`

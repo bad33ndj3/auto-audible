@@ -22,8 +22,13 @@ This repository contains a small Go wrapper around `audible-cli`. The wrapper is
 
 ## Files that matter
 
-- `main.go`: the full CLI implementation
-- `main_test.go`: unit tests for argument and parsing helpers
+- `main.go`: CLI entrypoint — parsing, wiring adapters, dispatching commands
+- `domain.go`: pure business logic — entities, value objects, stateless helpers
+- `ports.go`: interfaces for all external dependencies (audible-cli, ffmpeg, filesystem, prompter, store)
+- `adapters.go`: live infrastructure adapters that implement the ports
+- `app.go`: application service — orchestrates use cases (`Download`, `Convert`, `Clean`, `Status`)
+- `main_test.go`: unit tests for domain logic and CLI parsing
+- `app_test.go`: TDD-style application tests using fake adapters
 - `Taskfile.yaml`: local shortcuts
 - `Dockerfile`: image with Go binary, `audible-cli`, and `ffmpeg`
 - `README.md`: user-facing setup and usage

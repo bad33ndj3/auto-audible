@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+// === Existing domain/adapter tests ===
 
 func TestParseLibraryJSON(t *testing.T) {
 	tempDir := t.TempDir()
@@ -245,4 +250,60 @@ func TestRenameDownloadedFilesWithSeries(t *testing.T) {
 			t.Fatalf("expected file %s to exist: %v", name, err)
 		}
 	}
+}
+
+// === New CLI tests ===
+
+func TestRun_HelpCommand(t *testing.T) {
+	if err := run(context.Background(), []string{"help"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRun_HelpSpecificCommand(t *testing.T) {
+	if err := run(context.Background(), []string{"help", "status"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRun_UnknownCommand(t *testing.T) {
+	err := run(context.Background(), []string{"unknown"})
+	if err == nil {
+		t.Fatal("expected error for unknown command")
+	}
+}
+
+func TestRun_NoCommand(t *testing.T) {
+	err := run(context.Background(), []string{})
+	if err == nil {
+		t.Fatal("expected error for no command")
+	}
+}
+
+func TestRun_StatusTableFlag(t *testing.T) {
+	err := run(context.Background(), []string{"status", "-table"})
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			t.Fatal("did not expect flag help error")
+		}
+		// The error should NOT be about undefined flags
+		if contains(err.Error(), "flag provided but not defined") {
+			t.Fatalf("unexpected flag error: %v", err)
+		}
+	}
+	// If audible-cli is configured, this may succeed. The key assertion is
+	// that it does not fail with a flag-parsing error.
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsInternal(s, substr))
+}
+
+func containsInternal(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
