@@ -22,7 +22,7 @@ func TestParseLibraryJSON(t *testing.T) {
 		t.Fatalf("write temp library: %v", err)
 	}
 
-	asins, err := parseLibraryJSON(path)
+	asins, err := parseLibraryJSON(&osFS{}, path)
 	if err != nil {
 		t.Fatalf("parseLibraryJSON returned error: %v", err)
 	}
@@ -43,8 +43,8 @@ func TestExtractActivationBytes(t *testing.T) {
 }
 
 func TestAudibleArgsSkipsEmptyPassword(t *testing.T) {
-	cfg := config{Profile: "audible"}
-	got := audibleArgs(cfg, "library", "list")
+	cli := newAudibleCLI("audible", "")
+	got := cli.args("library", "list")
 	want := []string{"--profile", "audible", "library", "list"}
 
 	if !reflect.DeepEqual(got, want) {
@@ -73,7 +73,8 @@ func TestScanMediaState(t *testing.T) {
 		}
 	}
 
-	state, err := scanMediaState(mediaDir)
+	app := &App{FS: &osFS{}, MediaDir: mediaDir}
+	state, err := app.scanMediaState()
 	if err != nil {
 		t.Fatalf("scanMediaState returned error: %v", err)
 	}
@@ -104,7 +105,8 @@ func TestLoadVoucherKeyIV(t *testing.T) {
 		t.Fatalf("write voucher: %v", err)
 	}
 
-	key, iv, err := loadVoucherKeyIV(voucherPath)
+	app := &App{FS: &osFS{}}
+	key, iv, err := app.loadVoucherKeyIV(voucherPath)
 	if err != nil {
 		t.Fatalf("loadVoucherKeyIV returned error: %v", err)
 	}
@@ -120,14 +122,14 @@ func TestComputeBookState(t *testing.T) {
 	tests := []struct {
 		name    string
 		tracked bool
-		info    bookMediaInfo
+		info    MediaInfo
 		want    string
 	}{
-		{name: "ready", tracked: true, info: bookMediaInfo{HasM4B: true}, want: "ready"},
-		{name: "needs aax", tracked: true, info: bookMediaInfo{HasAAX: true}, want: "needs_convert_aax"},
-		{name: "needs aaxc", tracked: true, info: bookMediaInfo{HasAAXC: true}, want: "needs_convert_aaxc"},
-		{name: "tracked no media", tracked: true, info: bookMediaInfo{}, want: "tracked_no_media"},
-		{name: "not downloaded", tracked: false, info: bookMediaInfo{}, want: "not_downloaded"},
+		{name: "ready", tracked: true, info: MediaInfo{HasM4B: true}, want: "ready"},
+		{name: "needs aax", tracked: true, info: MediaInfo{HasAAX: true}, want: "needs_convert_aax"},
+		{name: "needs aaxc", tracked: true, info: MediaInfo{HasAAXC: true}, want: "needs_convert_aaxc"},
+		{name: "tracked no media", tracked: true, info: MediaInfo{}, want: "tracked_no_media"},
+		{name: "not downloaded", tracked: false, info: MediaInfo{}, want: "not_downloaded"},
 	}
 
 	for _, tt := range tests {
@@ -196,7 +198,8 @@ func TestRenameDownloadedFiles(t *testing.T) {
 		}
 	}
 
-	if err := renameDownloadedFiles(dir, "B001", "My Book: Title", false, nil); err != nil {
+	app := &App{FS: &osFS{}}
+	if err := app.renameDownloadedFiles(dir, "B001", "My Book: Title", false, nil); err != nil {
 		t.Fatalf("renameDownloadedFiles failed: %v", err)
 	}
 
@@ -227,7 +230,8 @@ func TestRenameDownloadedFilesWithSeries(t *testing.T) {
 		}
 	}
 
-	if err := renameDownloadedFiles(dir, "B002", "Armor World", true, float64(15)); err != nil {
+	app := &App{FS: &osFS{}}
+	if err := app.renameDownloadedFiles(dir, "B002", "Armor World", true, float64(15)); err != nil {
 		t.Fatalf("renameDownloadedFiles failed: %v", err)
 	}
 
