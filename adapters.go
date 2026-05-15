@@ -44,11 +44,14 @@ type chapterFile struct {
 type audibleCLI struct {
 	profile  string
 	password string
+	silent   bool
 }
 
 func newAudibleCLI(profile, password string) *audibleCLI {
 	return &audibleCLI{profile: profile, password: password}
 }
+
+func (a *audibleCLI) SetSilent(v bool) { a.silent = v }
 
 func (a *audibleCLI) args(base ...string) []string {
 	cmdArgs := make([]string, 0, len(base)+4)
@@ -138,8 +141,13 @@ func (a *audibleCLI) GetActivationBytes(ctx context.Context) (string, error) {
 func (a *audibleCLI) run(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, "audible", a.args(args...)...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if a.silent {
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	return cmd.Run()
 }
 
@@ -158,11 +166,15 @@ func (a *audibleCLI) runOutput(ctx context.Context, args ...string) (string, err
 }
 
 // ffmpegConverter is the live adapter for ffmpeg.
-type ffmpegConverter struct{}
+type ffmpegConverter struct {
+	silent bool
+}
 
 func newFFmpegConverter() *ffmpegConverter {
 	return &ffmpegConverter{}
 }
+
+func (f *ffmpegConverter) SetSilent(v bool) { f.silent = v }
 
 func (f *ffmpegConverter) ConvertAAX(ctx context.Context, inputPath, outputPath, activationBytes string) error {
 	return f.run(ctx,
@@ -194,8 +206,13 @@ func (f *ffmpegConverter) ConvertAAXC(ctx context.Context, inputPath, outputPath
 func (f *ffmpegConverter) run(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if f.silent {
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	return cmd.Run()
 }
 
@@ -242,6 +259,38 @@ func (s *jsonASINStore) Load() ([]string, error) {
 
 func (s *jsonASINStore) Save(asins []string) error {
 	data, err := json.MarshalIndent(asins, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.path, data, 0o644)
+}
+
+// jsonMediaIndexStore persists the media index to a JSON file.
+type jsonMediaIndexStore struct {
+	path string
+}
+
+func newJSONMediaIndexStore(path string) *jsonMediaIndexStore {
+	return &jsonMediaIndexStore{path: path}
+}
+
+func (s *jsonMediaIndexStore) Load() (MediaIndex, error) {
+	if _, err := os.Stat(s.path); os.IsNotExist(err) {
+		return MediaIndex{}, nil
+	}
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return nil, err
+	}
+	var index MediaIndex
+	if err := json.Unmarshal(data, &index); err != nil {
+		return nil, err
+	}
+	return index, nil
+}
+
+func (s *jsonMediaIndexStore) Save(index MediaIndex) error {
+	data, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return err
 	}

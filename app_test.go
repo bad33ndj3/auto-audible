@@ -209,6 +209,7 @@ func TestDownload_SkipsAlreadyDownloaded(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true
 	fs.entries["media"] = []os.DirEntry{}
+	fs.files["media/B001.m4b"] = []byte("x")
 
 	store := &fakeStore{asins: []string{"B001"}}
 	audible := &fakeAudible{

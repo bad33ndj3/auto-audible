@@ -44,3 +44,9 @@ type ASINStore interface {
 	Load() ([]string, error)
 	Save(asins []string) error
 }
+
+// MediaIndexStore persists the media index (ASIN -> file location mapping).
+type MediaIndexStore interface {
+	Load() (MediaIndex, error)
+	Save(index MediaIndex) error
+}

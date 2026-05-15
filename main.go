@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 )
@@ -19,6 +20,7 @@ type globalFlags struct {
 	Password string
 	Profile  string
 	Workers  int
+	NoTUI    bool
 }
 
 // cmdSpec defines a single CLI command.
@@ -77,6 +79,7 @@ func run(ctx context.Context, args []string) error {
 	fs.StringVar(&globals.Password, "password", "", "audible auth-file password")
 	fs.StringVar(&globals.Profile, "profile", "", "audible-cli profile")
 	fs.IntVar(&globals.Workers, "workers", 4, "number of parallel downloads")
+	fs.BoolVar(&globals.NoTUI, "no-tui", false, "disable the interactive TUI")
 
 	if cmd.Setup != nil {
 		cmd.Setup(fs)
@@ -94,6 +97,7 @@ func run(ctx context.Context, args []string) error {
 		Converter:       newFFmpegConverter(),
 		FS:              newOSFS(),
 		Store:           newJSONASINStore(downloadedAsinsPath),
+		MediaIndex:      newJSONMediaIndexStore(filepath.Join(globals.MediaDir, "media_index.json")),
 		Prompter:        newStdinPrompter(),
 		MediaDir:        globals.MediaDir,
 		DownloadWorkers: globals.Workers,
@@ -103,6 +107,12 @@ func run(ctx context.Context, args []string) error {
 		if err := app.EnsureAudibleConfigured(ctx); err != nil {
 			return err
 		}
+	}
+
+	// Launch TUI for supported commands when running in an interactive terminal.
+	tuiCommands := map[string]bool{"status": true, "download": true, "convert": true, "all": true}
+	if !globals.NoTUI && tuiCommands[cmd.Name] && isInteractive() {
+		return runTUI(app, cmd.Name)
 	}
 
 	return cmd.Run(ctx, app, fs)

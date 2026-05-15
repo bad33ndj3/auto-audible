@@ -5,7 +5,19 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// MediaEntry tracks a single downloaded book inside the media directory.
+type MediaEntry struct {
+	Path         string    `json:"path"`
+	Title        string    `json:"title"`
+	Series       string    `json:"series,omitempty"`
+	DownloadedAt time.Time `json:"downloaded_at"`
+}
+
+// MediaIndex maps ASINs to their on-disk locations.
+type MediaIndex map[string]MediaEntry
 
 // Book represents an Audible library item.
 type Book struct {

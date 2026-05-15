@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // App orchestrates the audible download and conversion workflow.
@@ -18,11 +19,21 @@ type App struct {
 	Converter       MediaConverter
 	FS              FileSystem
 	Store           ASINStore
+	MediaIndex      MediaIndexStore
 	Prompter        Prompter
 	MediaDir        string
 	DownloadWorkers int
+	Progress        ProgressReporter
 	lookPath        func(string) (string, error)
 	interactive     func() bool
+	downloadStart   time.Time
+}
+
+func (a *App) progress() ProgressReporter {
+	if a.Progress == nil {
+		return &noopProgress{}
+	}
+	return a.Progress
 }
 
 func (a *App) EnsureAudibleConfigured(ctx context.Context) error {
@@ -75,15 +86,21 @@ func (a *App) Download(ctx context.Context) error {
 		return fmt.Errorf("failed to create media directory: %w", err)
 	}
 
+	if err := a.syncMediaIndex(); err != nil {
+		a.progress().Log(fmt.Sprintf("Warning: failed to sync media index: %v", err))
+	}
+
 	items, err := a.Audible.ExportLibrary(ctx)
 	if err != nil {
 		return err
 	}
 
 	if len(items) == 0 {
-		fmt.Println("No library items found in Audible export")
+		a.progress().Log("No library items found in Audible export")
 		return nil
 	}
+
+	a.progress().SetLibrary(items)
 
 	downloaded, err := a.Store.Load()
 	if err != nil {
@@ -93,6 +110,39 @@ func (a *App) Download(ctx context.Context) error {
 	downloadedSet := make(map[string]struct{}, len(downloaded))
 	for _, asin := range downloaded {
 		downloadedSet[asin] = struct{}{}
+	}
+
+	// Sync store against actual media files on disk.
+	// If a .m4b exists for a book, ensure its ASIN is in the store.
+	// If an ASIN is in the store but no media exists, remove it.
+	changed := false
+	newDownloaded := make([]string, 0, len(items))
+	for _, item := range items {
+		asin := item.ASIN
+		if a.hasM4BForBook(item) {
+			if _, ok := downloadedSet[asin]; !ok {
+				downloadedSet[asin] = struct{}{}
+				changed = true
+			}
+			newDownloaded = append(newDownloaded, asin)
+			a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StateReady})
+		} else if _, ok := downloadedSet[asin]; ok {
+			// ASIN in store but no media -> remove from store
+			changed = true
+			a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StatePending})
+		} else {
+			a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StatePending})
+		}
+	}
+	if changed {
+		if saveErr := a.Store.Save(newDownloaded); saveErr != nil {
+			a.progress().Log(fmt.Sprintf("Warning: failed to update downloaded ASINs store: %v", saveErr))
+		}
+		downloaded = newDownloaded
+		downloadedSet = make(map[string]struct{}, len(downloaded))
+		for _, asin := range downloaded {
+			downloadedSet[asin] = struct{}{}
+		}
 	}
 
 	type job struct {
@@ -105,7 +155,7 @@ func (a *App) Download(ctx context.Context) error {
 	for _, item := range items {
 		asin := item.ASIN
 		if _, ok := downloadedSet[asin]; ok {
-			fmt.Printf("ASIN %s already downloaded, skipping.\n", asin)
+			a.progress().Log(fmt.Sprintf("ASIN %s already downloaded, skipping.", asin))
 			continue
 		}
 
@@ -132,6 +182,12 @@ func (a *App) Download(ctx context.Context) error {
 	var wg sync.WaitGroup
 	jobCh := make(chan job)
 
+	pending := len(jobs)
+	completed := 0
+	failed := 0
+
+	a.downloadStart = time.Now()
+
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -140,23 +196,45 @@ func (a *App) Download(ctx context.Context) error {
 				item := j.item
 				asin := item.ASIN
 
-				fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
+				a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StateDownloading})
+				a.progress().Log(fmt.Sprintf("Downloading ASIN %s (%s)", asin, item.Title))
 				if err := a.Audible.DownloadBook(ctx, asin, j.outputDir); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
+					a.progress().Log(fmt.Sprintf("Failed to download ASIN %s: %v", asin, err))
+					a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StateError, Message: err.Error()})
+					mu.Lock()
+					failed++
+					a.updateDownloadStats(pending, completed, failed)
+					mu.Unlock()
 					continue
 				}
 
 				if err := a.renameDownloadedFiles(j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
+					a.progress().Log(fmt.Sprintf("Failed to rename files for ASIN %s: %v", asin, err))
+				}
+
+				if err := a.trackMediaIndex(asin, item.Title, item.SeriesTitle, item.SeriesSequence); err != nil {
+					a.progress().Log(fmt.Sprintf("Failed to update media index for ASIN %s: %v", asin, err))
 				}
 
 				mu.Lock()
 				downloaded = append(downloaded, asin)
 				downloadedSet[asin] = struct{}{}
 				if err := a.Store.Save(downloaded); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
+					a.progress().Log(fmt.Sprintf("Failed to save downloaded ASINs: %v", err))
 				}
+				completed++
+				a.updateDownloadStats(pending, completed, failed)
 				mu.Unlock()
+
+				// Determine post-download state by checking files.
+				info := a.mediaInfoForBase(j.outputDir, sanitizeFileName(item.Title))
+				if info.HasM4B {
+					a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StateReady})
+				} else if info.HasAAX || info.HasAAXC {
+					a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StateNeedsConvert})
+				} else {
+					a.progress().UpdateBook(BookProgress{ASIN: asin, Title: item.Title, State: StateDownloaded})
+				}
 			}
 		}()
 	}
@@ -167,6 +245,124 @@ func (a *App) Download(ctx context.Context) error {
 	close(jobCh)
 	wg.Wait()
 
+	a.progress().Done()
+	return nil
+}
+
+func (a *App) updateDownloadStats(pending, completed, failed int) {
+	total := pending + completed + failed
+	a.progress().SetStats(total, completed, 0, 0, pending-failed, failed)
+
+	percent := 0
+	if total > 0 {
+		percent = int(float64(completed+failed) / float64(total) * 100)
+	}
+	var speed string
+	if !a.downloadStart.IsZero() && (completed+failed) > 0 {
+		elapsed := time.Since(a.downloadStart)
+		bpm := float64(completed+failed) / elapsed.Minutes()
+		speed = fmt.Sprintf("%d/%d done | ~%.1f books/min", completed+failed, total, bpm)
+	} else {
+		speed = fmt.Sprintf("%d/%d", completed+failed, total)
+	}
+	a.progress().SetOverallProgress(percent, speed)
+}
+
+func (a *App) trackMediaIndex(asin, title, seriesTitle string, seriesSeq interface{}) error {
+	if a.MediaIndex == nil {
+		return nil
+	}
+	index, err := a.MediaIndex.Load()
+	if err != nil {
+		return err
+	}
+	if index == nil {
+		index = make(MediaIndex)
+	}
+
+	// Determine the directory and base name that the book should live at.
+	dir := a.MediaDir
+	base := sanitizeFileName(title)
+	if strings.TrimSpace(seriesTitle) != "" {
+		dir = filepath.Join(a.MediaDir, sanitizeFileName(seriesTitle))
+		base = formatPrefix(seriesSeq) + base
+	}
+
+	// Find which final media file actually exists for this ASIN.
+	var foundPath string
+	for _, ext := range []string{".m4b", ".aax", ".aaxc"} {
+		p := filepath.Join(dir, base+ext)
+		if fileExistsFS(a.FS, p) {
+			rel, _ := filepath.Rel(a.MediaDir, p)
+			foundPath = rel
+			break
+		}
+	}
+	if foundPath == "" {
+		// The rename may have added a collision suffix; scan the directory.
+		entries, err := a.FS.ReadDir(dir)
+		if err == nil {
+			for _, entry := range entries {
+				name := entry.Name()
+				noExt := strings.TrimSuffix(name, filepath.Ext(name))
+				if strings.HasPrefix(noExt, base) {
+					ext := strings.ToLower(filepath.Ext(name))
+					if ext == ".m4b" || ext == ".aax" || ext == ".aaxc" {
+						rel, _ := filepath.Rel(a.MediaDir, filepath.Join(dir, name))
+						foundPath = rel
+						break
+					}
+				}
+			}
+		}
+	}
+	if foundPath == "" {
+		// Last fallback: search the whole media tree for any file starting with the raw ASIN.
+		_ = a.FS.WalkDir(a.MediaDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			name := d.Name()
+			baseName := strings.TrimSuffix(name, filepath.Ext(name))
+			if baseName == asin || strings.HasPrefix(baseName, asin+"_") || strings.HasPrefix(baseName, asin+"-") {
+				rel, _ := filepath.Rel(a.MediaDir, path)
+				foundPath = rel
+				return filepath.SkipAll
+			}
+			return nil
+		})
+	}
+	if foundPath == "" {
+		return nil
+	}
+
+	index[asin] = MediaEntry{
+		Path:         foundPath,
+		Title:        title,
+		Series:       seriesTitle,
+		DownloadedAt: time.Now().UTC(),
+	}
+	return a.MediaIndex.Save(index)
+}
+
+func (a *App) syncMediaIndex() error {
+	if a.MediaIndex == nil {
+		return nil
+	}
+	index, err := a.MediaIndex.Load()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for asin, entry := range index {
+		if !fileExistsFS(a.FS, filepath.Join(a.MediaDir, entry.Path)) {
+			delete(index, asin)
+			changed = true
+		}
+	}
+	if changed {
+		return a.MediaIndex.Save(index)
+	}
 	return nil
 }
 
@@ -235,6 +431,31 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 	return nil
 }
 
+func (a *App) updateMediaIndexPath(oldPath, newPath string) error {
+	if a.MediaIndex == nil {
+		return nil
+	}
+	index, err := a.MediaIndex.Load()
+	if err != nil {
+		return err
+	}
+	changed := false
+	oldRel, _ := filepath.Rel(a.MediaDir, oldPath)
+	newRel, _ := filepath.Rel(a.MediaDir, newPath)
+	for asin, entry := range index {
+		if entry.Path == oldRel {
+			entry.Path = newRel
+			index[asin] = entry
+			changed = true
+			break
+		}
+	}
+	if changed {
+		return a.MediaIndex.Save(index)
+	}
+	return nil
+}
+
 func (a *App) Convert(ctx context.Context) error {
 	lp := a.lookPath
 	if lp == nil {
@@ -254,7 +475,7 @@ func (a *App) Convert(ctx context.Context) error {
 	}
 
 	if len(aaxFiles) == 0 && len(aaxcFiles) == 0 {
-		fmt.Println("No .aax or .aaxc files found to convert")
+		a.progress().Log("No .aax or .aaxc files found to convert")
 		return nil
 	}
 
@@ -266,34 +487,67 @@ func (a *App) Convert(ctx context.Context) error {
 		}
 	}
 
+	// Build a synthetic library for the TUI from files to convert.
+	allFiles := append(aaxFiles, aaxcFiles...)
+	for _, path := range allFiles {
+		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateNeedsConvert})
+	}
+
 	failed := 0
+	converted := 0
+	total := len(allFiles)
+
 	for _, inputPath := range aaxFiles {
 		outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".m4b"
-		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
+		name := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+		a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateConverting})
+		a.progress().Log(fmt.Sprintf("Converting %s -> %s", inputPath, outputPath))
 		if err := a.Converter.ConvertAAX(ctx, inputPath, outputPath, activationBytes); err != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
+			a.progress().Log(fmt.Sprintf("Failed to convert %s: %v", inputPath, err))
+			a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateError, Message: err.Error()})
+		} else {
+			converted++
+			a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateReady})
+			if err := a.updateMediaIndexPath(inputPath, outputPath); err != nil {
+				a.progress().Log(fmt.Sprintf("Failed to update media index after convert: %v", err))
+			}
 		}
+		a.progress().SetStats(total, converted, 0, total-converted-failed, 0, failed)
 	}
 
 	for _, inputPath := range aaxcFiles {
 		outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".m4b"
 		voucherPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".voucher"
+		name := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 
 		key, iv, keyErr := a.loadVoucherKeyIV(voucherPath)
 		if keyErr != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "Failed to load voucher for %s: %v\n", inputPath, keyErr)
+			a.progress().Log(fmt.Sprintf("Failed to load voucher for %s: %v", inputPath, keyErr))
+			a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateError, Message: keyErr.Error()})
+			a.progress().SetStats(total, converted, 0, total-converted-failed, 0, failed)
 			continue
 		}
 
-		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
+		a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateConverting})
+		a.progress().Log(fmt.Sprintf("Converting %s -> %s", inputPath, outputPath))
 		if err := a.Converter.ConvertAAXC(ctx, inputPath, outputPath, key, iv); err != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
+			a.progress().Log(fmt.Sprintf("Failed to convert %s: %v", inputPath, err))
+			a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateError, Message: err.Error()})
+		} else {
+			converted++
+			a.progress().UpdateBook(BookProgress{ASIN: name, Title: name, State: StateReady})
+			if err := a.updateMediaIndexPath(inputPath, outputPath); err != nil {
+				a.progress().Log(fmt.Sprintf("Failed to update media index after convert: %v", err))
+			}
 		}
+		a.progress().SetStats(total, converted, 0, total-converted-failed, 0, failed)
 	}
 
+	a.progress().Done()
 	if failed > 0 {
 		return fmt.Errorf("failed to convert %d file(s)", failed)
 	}
@@ -340,6 +594,9 @@ func (a *App) Clean(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to clean media directory: %w", err)
+	}
+	if err := a.syncMediaIndex(); err != nil {
+		return fmt.Errorf("failed to sync media index after clean: %w", err)
 	}
 	return nil
 }
@@ -614,6 +871,34 @@ func findFilesRecursiveFS(fs FileSystem, root, ext string) ([]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+func (a *App) hasM4BForBook(book Book) bool {
+	// Prefer the media index when available, but only if it points to a .m4b.
+	if a.MediaIndex != nil {
+		index, err := a.MediaIndex.Load()
+		if err == nil {
+			if entry, ok := index[book.ASIN]; ok {
+				if strings.HasSuffix(strings.ToLower(entry.Path), ".m4b") &&
+					fileExistsFS(a.FS, filepath.Join(a.MediaDir, entry.Path)) {
+					return true
+				}
+			}
+		}
+	}
+
+	seriesTitle := strings.TrimSpace(book.SeriesTitle)
+	dir := a.MediaDir
+	base := sanitizeFileName(book.Title)
+	if seriesTitle != "" {
+		dir = filepath.Join(a.MediaDir, sanitizeFileName(seriesTitle))
+		base = formatPrefix(book.SeriesSequence) + base
+	}
+	// Check renamed file first, then fallback to raw ASIN filename.
+	if fileExistsFS(a.FS, filepath.Join(dir, base+".m4b")) {
+		return true
+	}
+	return fileExistsFS(a.FS, filepath.Join(a.MediaDir, book.ASIN+".m4b"))
 }
 
 func isInteractive() bool {
