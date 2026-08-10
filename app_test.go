@@ -600,6 +600,42 @@ func TestConvert_SkipsMergeWhenPartsIncomplete(t *testing.T) {
 	}
 }
 
+func TestConvert_DoesNotOverwriteMergedBook(t *testing.T) {
+	fs := newFakeFS()
+	manifestData, err := json.Marshal(partsManifest{
+		ASIN:       "B001",
+		Parts:      []string{"B002", "B003"},
+		OutputBase: "Existing Book",
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	fs.files["media/B001-parts.json"] = manifestData
+	fs.files["media/B002.m4b"] = []byte("part 1")
+	fs.files["media/B003.m4b"] = []byte("part 2")
+	fs.files["media/Existing Book.m4b"] = []byte("finished")
+	converter := &fakeConverter{}
+
+	app := &App{
+		Audible:   &fakeAudible{},
+		Converter: converter,
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+	if err := app.Convert(context.Background()); err == nil {
+		t.Fatal("expected existing merged book to be preserved")
+	}
+	if len(converter.concatCalls) != 0 {
+		t.Fatal("expected ffmpeg concat not to run")
+	}
+	for _, path := range []string{"media/B002.m4b", "media/B003.m4b"} {
+		if _, ok := fs.files[path]; !ok {
+			t.Fatalf("expected part %s to be preserved", path)
+		}
+	}
+}
+
 func TestConvert_RejectsUnsafePartASIN(t *testing.T) {
 	fs := newFakeFS()
 	manifestData, err := json.Marshal(partsManifest{

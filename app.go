@@ -407,6 +407,9 @@ func (a *App) mergeParts(ctx context.Context) error {
 		}
 
 		outputPath := filepath.Join(dir, manifest.OutputBase+".m4b")
+		if fileExistsFS(a.FS, outputPath) {
+			return fmt.Errorf("refusing to overwrite existing merged book %s", outputPath)
+		}
 		listPath := filepath.Join(dir, manifest.ASIN+"-concat.txt")
 
 		var listBuilder strings.Builder
