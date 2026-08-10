@@ -123,6 +123,38 @@ func (a *audibleCLI) DownloadBook(ctx context.Context, asin, outputDir string) e
 	)
 }
 
+// audioPartsResponse is the shape of `audible api library` responses.
+type audioPartsResponse struct {
+	Items []struct {
+		ASIN string `json:"asin"`
+	} `json:"items"`
+}
+
+func (a *audibleCLI) GetAudioParts(ctx context.Context, asin string) ([]string, error) {
+	output, err := a.runOutput(ctx,
+		"api", "library",
+		"-p", "parent_asin="+asin,
+		"-p", "response_groups=product_attrs",
+		"-f", "json",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch audio parts for %s: %w", asin, err)
+	}
+
+	var resp audioPartsResponse
+	if err := json.Unmarshal([]byte(output), &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse audio parts response for %s: %w", asin, err)
+	}
+
+	parts := make([]string, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		if asin := strings.TrimSpace(item.ASIN); asin != "" {
+			parts = append(parts, asin)
+		}
+	}
+	return parts, nil
+}
+
 func (a *audibleCLI) GetActivationBytes(ctx context.Context) (string, error) {
 	output, err := a.runOutput(ctx, "activation-bytes")
 	if err != nil {
@@ -191,6 +223,18 @@ func (f *ffmpegConverter) ConvertAAXC(ctx context.Context, inputPath, outputPath
 	)
 }
 
+func (f *ffmpegConverter) ConcatM4B(ctx context.Context, listPath, outputPath string) error {
+	return f.run(ctx,
+		"-y",
+		"-loglevel", "error",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", listPath,
+		"-c", "copy",
+		outputPath,
+	)
+}
+
 func (f *ffmpegConverter) run(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdin = os.Stdin
@@ -204,17 +248,17 @@ type osFS struct{}
 
 func newOSFS() *osFS { return &osFS{} }
 
-func (o *osFS) MkdirAll(path string, perm os.FileMode) error       { return os.MkdirAll(path, perm) }
-func (o *osFS) ReadDir(name string) ([]os.DirEntry, error)         { return os.ReadDir(name) }
-func (o *osFS) ReadFile(name string) ([]byte, error)               { return os.ReadFile(name) }
+func (o *osFS) MkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }
+func (o *osFS) ReadDir(name string) ([]os.DirEntry, error)   { return os.ReadDir(name) }
+func (o *osFS) ReadFile(name string) ([]byte, error)         { return os.ReadFile(name) }
 func (o *osFS) WriteFile(name string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(name, data, perm)
 }
-func (o *osFS) Rename(oldpath, newpath string) error               { return os.Rename(oldpath, newpath) }
-func (o *osFS) Remove(name string) error                           { return os.Remove(name) }
-func (o *osFS) Stat(name string) (os.FileInfo, error)              { return os.Stat(name) }
-func (o *osFS) WalkDir(root string, fn fs.WalkDirFunc) error { return filepath.WalkDir(root, fn) }
-func (o *osFS) CreateTemp(dir, pattern string) (*os.File, error)   { return os.CreateTemp(dir, pattern) }
+func (o *osFS) Rename(oldpath, newpath string) error             { return os.Rename(oldpath, newpath) }
+func (o *osFS) Remove(name string) error                         { return os.Remove(name) }
+func (o *osFS) Stat(name string) (os.FileInfo, error)            { return os.Stat(name) }
+func (o *osFS) WalkDir(root string, fn fs.WalkDirFunc) error     { return filepath.WalkDir(root, fn) }
+func (o *osFS) CreateTemp(dir, pattern string) (*os.File, error) { return os.CreateTemp(dir, pattern) }
 
 // jsonASINStore persists downloaded ASINs to a JSON file.
 type jsonASINStore struct {

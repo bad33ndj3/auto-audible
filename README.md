@@ -31,7 +31,7 @@ The wrapper will also detect missing setup and ask to run it when you start the 
 ## Commands
 
 ```bash
-go run . download [--profile audible] [--password secret] [--media-dir media]
+go run . download [--profile audible] [--password secret] [--media-dir media] [--workers 1]
 go run . convert  [--profile audible] [--password secret] [--media-dir media]
 go run . clean    [--media-dir media]
 go run . ready    [--media-dir media]
@@ -48,6 +48,8 @@ Command summary:
 - `ready`: lists ready-to-listen `.m4b` titles and what is still pending (`.aax` / `.aaxc`)
 - `status`: checks current library/media status (total library, tracked downloads, remaining, ready, pending conversions)
 - `all`: runs `download` and `convert`
+
+Downloads run one at a time by default to avoid stressing Audible connections. If your connection and account tolerate parallel downloads, increase `--workers` explicitly.
 
 ## Auth behavior
 

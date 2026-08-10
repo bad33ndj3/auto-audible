@@ -12,6 +12,7 @@ import (
 )
 
 const downloadedAsinsPath = "downloaded_asins.json"
+const defaultDownloadWorkers = 1
 
 // globalFlags are shared across all commands.
 type globalFlags struct {
@@ -76,7 +77,7 @@ func run(ctx context.Context, args []string) error {
 	fs.StringVar(&globals.MediaDir, "media-dir", "media", "media directory")
 	fs.StringVar(&globals.Password, "password", "", "audible auth-file password")
 	fs.StringVar(&globals.Profile, "profile", "", "audible-cli profile")
-	fs.IntVar(&globals.Workers, "workers", 4, "number of parallel downloads")
+	fs.IntVar(&globals.Workers, "workers", defaultDownloadWorkers, "number of parallel downloads")
 
 	if cmd.Setup != nil {
 		cmd.Setup(fs)
@@ -192,7 +193,7 @@ func printUsage(commands map[string]cmdSpec) {
 	fmt.Fprintln(os.Stderr, "  -media-dir string    media directory (default \"media\")")
 	fmt.Fprintln(os.Stderr, "  -password string     audible auth-file password")
 	fmt.Fprintln(os.Stderr, "  -profile string      audible-cli profile")
-	fmt.Fprintln(os.Stderr, "  -workers int         number of parallel downloads (default 4)")
+	fmt.Fprintf(os.Stderr, "  -workers int         number of parallel downloads (default %d)\n", defaultDownloadWorkers)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Run 'auto-audible help <command>' for details.")
 }
@@ -205,7 +206,7 @@ func printCommandHelp(cmd cmdSpec) {
 	fs.String("media-dir", "media", "media directory")
 	fs.String("password", "", "audible auth-file password")
 	fs.String("profile", "", "audible-cli profile")
-	fs.Int("workers", 4, "number of parallel downloads")
+	fs.Int("workers", defaultDownloadWorkers, "number of parallel downloads")
 	if cmd.Setup != nil {
 		cmd.Setup(fs)
 	}

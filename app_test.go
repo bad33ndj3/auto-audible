@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,15 +16,18 @@ import (
 
 // fakeAudible is a test double for AudibleService.
 type fakeAudible struct {
-	hasProfile        bool
-	hasProfileErr     error
-	quickstartErr     error
-	library           []Book
-	libraryErr        error
-	downloaded        []string
-	downloadErr       error
-	activationBytes   string
+	hasProfile         bool
+	hasProfileErr      error
+	quickstartErr      error
+	library            []Book
+	libraryErr         error
+	downloaded         []string
+	downloadErr        error
+	activationBytes    string
 	activationBytesErr error
+	audioParts         map[string][]string
+	audioPartsErr      error
+	audioPartsCalls    []string
 }
 
 func (f *fakeAudible) HasProfile(ctx context.Context) (bool, error) {
@@ -49,13 +53,22 @@ func (f *fakeAudible) DownloadBook(ctx context.Context, asin, outputDir string) 
 func (f *fakeAudible) GetActivationBytes(ctx context.Context) (string, error) {
 	return f.activationBytes, f.activationBytesErr
 }
+func (f *fakeAudible) GetAudioParts(ctx context.Context, asin string) ([]string, error) {
+	f.audioPartsCalls = append(f.audioPartsCalls, asin)
+	if f.audioPartsErr != nil {
+		return nil, f.audioPartsErr
+	}
+	return f.audioParts[asin], nil
+}
 
 // fakeConverter is a test double for MediaConverter.
 type fakeConverter struct {
-	aaxCalls  []struct{ input, output, bytes string }
-	aaxcCalls []struct{ input, output, key, iv string }
-	aaxErr    error
-	aaxcErr   error
+	aaxCalls    []struct{ input, output, bytes string }
+	aaxcCalls   []struct{ input, output, key, iv string }
+	concatCalls []struct{ listPath, output string }
+	aaxErr      error
+	aaxcErr     error
+	concatErr   error
 }
 
 func (f *fakeConverter) ConvertAAX(ctx context.Context, inputPath, outputPath, activationBytes string) error {
@@ -65,6 +78,10 @@ func (f *fakeConverter) ConvertAAX(ctx context.Context, inputPath, outputPath, a
 func (f *fakeConverter) ConvertAAXC(ctx context.Context, inputPath, outputPath, key, iv string) error {
 	f.aaxcCalls = append(f.aaxcCalls, struct{ input, output, key, iv string }{inputPath, outputPath, key, iv})
 	return f.aaxcErr
+}
+func (f *fakeConverter) ConcatM4B(ctx context.Context, listPath, outputPath string) error {
+	f.concatCalls = append(f.concatCalls, struct{ listPath, output string }{listPath, outputPath})
+	return f.concatErr
 }
 
 // fakeFS is an in-memory FileSystem for tests.
@@ -168,10 +185,12 @@ type fakeDirEntry struct {
 	isDir bool
 }
 
-func (d *fakeDirEntry) Name() string               { return d.name }
-func (d *fakeDirEntry) IsDir() bool                { return d.isDir }
-func (d *fakeDirEntry) Type() os.FileMode          { return 0 }
-func (d *fakeDirEntry) Info() (os.FileInfo, error) { return &fakeFileInfo{name: d.name, isDir: d.isDir}, nil }
+func (d *fakeDirEntry) Name() string      { return d.name }
+func (d *fakeDirEntry) IsDir() bool       { return d.isDir }
+func (d *fakeDirEntry) Type() os.FileMode { return 0 }
+func (d *fakeDirEntry) Info() (os.FileInfo, error) {
+	return &fakeFileInfo{name: d.name, isDir: d.isDir}, nil
+}
 
 // fakeStore is a test double for ASINStore.
 type fakeStore struct {
@@ -265,6 +284,84 @@ func TestDownload_CreatesSeriesDirectory(t *testing.T) {
 	}
 }
 
+func TestDownload_WritesPartsManifestForMultiPartBook(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+
+	store := &fakeStore{}
+	audible := &fakeAudible{
+		library: []Book{
+			{ASIN: "B0DK2815FK", Title: "This Inevitable Ruin"},
+		},
+		audioParts: map[string][]string{
+			"B0DK2815FK": {"B0DWPNQK52", "B0DWP16T86", "B0DWP7S13J"},
+		},
+	}
+	app := &App{
+		Audible:         audible,
+		FS:              fs,
+		Store:           store,
+		MediaDir:        "media",
+		DownloadWorkers: 1,
+	}
+
+	if err := app.Download(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, ok := fs.files["media/B0DK2815FK-parts.json"]
+	if !ok {
+		t.Fatal("expected parts manifest to be written")
+	}
+
+	var manifest partsManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("failed to parse manifest: %v", err)
+	}
+	if manifest.ASIN != "B0DK2815FK" {
+		t.Fatalf("unexpected asin: %s", manifest.ASIN)
+	}
+	if manifest.Title != "This Inevitable Ruin" {
+		t.Fatalf("unexpected title: %s", manifest.Title)
+	}
+	want := []string{"B0DWPNQK52", "B0DWP16T86", "B0DWP7S13J"}
+	if !reflect.DeepEqual(manifest.Parts, want) {
+		t.Fatalf("unexpected parts: got %v want %v", manifest.Parts, want)
+	}
+	if manifest.OutputBase != "This Inevitable Ruin" {
+		t.Fatalf("unexpected output base: %s", manifest.OutputBase)
+	}
+}
+
+func TestDownload_NoManifestForSinglePartBook(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+
+	store := &fakeStore{}
+	audible := &fakeAudible{
+		library: []Book{
+			{ASIN: "B001", Title: "Normal Book"},
+		},
+	}
+	app := &App{
+		Audible:         audible,
+		FS:              fs,
+		Store:           store,
+		MediaDir:        "media",
+		DownloadWorkers: 1,
+	}
+
+	if err := app.Download(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := fs.files["media/B001-parts.json"]; ok {
+		t.Fatal("did not expect a parts manifest for a single-part book")
+	}
+}
+
 func TestDownload_HandlesDownloadErrorGracefully(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true
@@ -326,6 +423,94 @@ func TestConvert_CallsConverterWithActivationBytes(t *testing.T) {
 	}
 	if converter.aaxcCalls[0].key != "key1" {
 		t.Fatalf("unexpected key: %s", converter.aaxcCalls[0].key)
+	}
+}
+
+func TestConvert_MergesMultiPartBook(t *testing.T) {
+	fs := newFakeFS()
+	manifest := partsManifest{
+		ASIN:       "B0DK2815FK",
+		Title:      "This Inevitable Ruin",
+		Parts:      []string{"B0DWPNQK52", "B0DWP16T86", "B0DWP7S13J"},
+		OutputBase: "This Inevitable Ruin",
+	}
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("failed to marshal manifest: %v", err)
+	}
+	fs.files["media/B0DK2815FK-parts.json"] = manifestData
+	fs.files["media/B0DWPNQK52.m4b"] = []byte("part1")
+	fs.files["media/B0DWP16T86.m4b"] = []byte("part2")
+	fs.files["media/B0DWP7S13J.m4b"] = []byte("part3")
+
+	converter := &fakeConverter{}
+	app := &App{
+		Audible:   &fakeAudible{},
+		Converter: converter,
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+
+	if err := app.Convert(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(converter.concatCalls) != 1 {
+		t.Fatalf("expected 1 concat call, got %d", len(converter.concatCalls))
+	}
+	if converter.concatCalls[0].output != "media/This Inevitable Ruin.m4b" {
+		t.Fatalf("unexpected concat output: %s", converter.concatCalls[0].output)
+	}
+
+	if _, ok := fs.files["media/B0DWPNQK52.m4b"]; ok {
+		t.Fatal("expected part 1 m4b to be removed after merge")
+	}
+	if _, ok := fs.files["media/B0DWP16T86.m4b"]; ok {
+		t.Fatal("expected part 2 m4b to be removed after merge")
+	}
+	if _, ok := fs.files["media/B0DWP7S13J.m4b"]; ok {
+		t.Fatal("expected part 3 m4b to be removed after merge")
+	}
+	if _, ok := fs.files["media/B0DK2815FK-parts.json"]; ok {
+		t.Fatal("expected manifest to be removed after merge")
+	}
+}
+
+func TestConvert_SkipsMergeWhenPartsIncomplete(t *testing.T) {
+	fs := newFakeFS()
+	manifest := partsManifest{
+		ASIN:       "B0DK2815FK",
+		Title:      "This Inevitable Ruin",
+		Parts:      []string{"B0DWPNQK52", "B0DWP16T86"},
+		OutputBase: "This Inevitable Ruin",
+	}
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("failed to marshal manifest: %v", err)
+	}
+	fs.files["media/B0DK2815FK-parts.json"] = manifestData
+	fs.files["media/B0DWPNQK52.m4b"] = []byte("part1")
+	// B0DWP16T86.m4b not converted yet.
+
+	converter := &fakeConverter{}
+	app := &App{
+		Audible:   &fakeAudible{},
+		Converter: converter,
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+
+	if err := app.Convert(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(converter.concatCalls) != 0 {
+		t.Fatalf("expected no concat call, got %d", len(converter.concatCalls))
+	}
+	if _, ok := fs.files["media/B0DK2815FK-parts.json"]; !ok {
+		t.Fatal("expected manifest to be kept for retry")
 	}
 }
 

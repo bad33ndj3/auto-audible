@@ -125,7 +125,7 @@ func (a *App) Download(ctx context.Context) error {
 
 	workers := a.DownloadWorkers
 	if workers <= 0 {
-		workers = 4
+		workers = defaultDownloadWorkers
 	}
 
 	var mu sync.Mutex
@@ -150,6 +150,10 @@ func (a *App) Download(ctx context.Context) error {
 					fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
 				}
 
+				if err := a.writePartsManifestIfSplit(ctx, j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to record audio parts for ASIN %s: %v\n", asin, err)
+				}
+
 				mu.Lock()
 				downloaded = append(downloaded, asin)
 				downloadedSet[asin] = struct{}{}
@@ -168,6 +172,29 @@ func (a *App) Download(ctx context.Context) error {
 	wg.Wait()
 
 	return nil
+}
+
+func (a *App) writePartsManifestIfSplit(ctx context.Context, outputDir, asin, title string, hasSeries bool, seriesSeq interface{}) error {
+	parts, err := a.Audible.GetAudioParts(ctx, asin)
+	if err != nil {
+		return err
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+
+	prefix := ""
+	if hasSeries {
+		prefix = formatPrefix(seriesSeq)
+	}
+	outputBase := prefix + sanitizeFileName(title)
+
+	manifest := partsManifest{ASIN: asin, Title: title, Parts: parts, OutputBase: outputBase}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return a.FS.WriteFile(partsManifestPath(outputDir, asin), data, 0o644)
 }
 
 func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries bool, seriesSeq interface{}) error {
@@ -203,7 +230,7 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 			suffix = base[len(asin):]
 		}
 
-		newName := prefix + sanitizedTitle + suffix + ext
+		newName := stripAudibleQualitySuffix(prefix+sanitizedTitle+suffix) + ext
 
 		newPath := filepath.Join(outputDir, newName)
 		if fileExistsFS(a.FS, newPath) && name != newName {
@@ -255,7 +282,6 @@ func (a *App) Convert(ctx context.Context) error {
 
 	if len(aaxFiles) == 0 && len(aaxcFiles) == 0 {
 		fmt.Println("No .aax or .aaxc files found to convert")
-		return nil
 	}
 
 	activationBytes := ""
@@ -268,7 +294,7 @@ func (a *App) Convert(ctx context.Context) error {
 
 	failed := 0
 	for _, inputPath := range aaxFiles {
-		outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".m4b"
+		outputPath := conversionOutputPath(inputPath)
 		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
 		if err := a.Converter.ConvertAAX(ctx, inputPath, outputPath, activationBytes); err != nil {
 			failed++
@@ -277,7 +303,7 @@ func (a *App) Convert(ctx context.Context) error {
 	}
 
 	for _, inputPath := range aaxcFiles {
-		outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".m4b"
+		outputPath := conversionOutputPath(inputPath)
 		voucherPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".voucher"
 
 		key, iv, keyErr := a.loadVoucherKeyIV(voucherPath)
@@ -297,7 +323,109 @@ func (a *App) Convert(ctx context.Context) error {
 	if failed > 0 {
 		return fmt.Errorf("failed to convert %d file(s)", failed)
 	}
+
+	if err := a.mergeParts(ctx); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// mergeParts finds part manifests written during Download and, for any
+// whose part .m4b files have all finished converting, concatenates them
+// into a single book file and removes the intermediate parts.
+func (a *App) mergeParts(ctx context.Context) error {
+	manifestPaths, err := findFilesRecursiveFS(a.FS, a.MediaDir, ".json")
+	if err != nil {
+		return fmt.Errorf("failed to list part manifests: %w", err)
+	}
+
+	for _, manifestPath := range manifestPaths {
+		if !strings.HasSuffix(manifestPath, "-parts.json") {
+			continue
+		}
+
+		data, err := a.FS.ReadFile(manifestPath)
+		if err != nil {
+			return fmt.Errorf("failed to read part manifest %s: %w", manifestPath, err)
+		}
+		var manifest partsManifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return fmt.Errorf("failed to parse part manifest %s: %w", manifestPath, err)
+		}
+
+		dir := filepath.Dir(manifestPath)
+		partPaths := make([]string, 0, len(manifest.Parts))
+		allConverted := true
+		for _, partASIN := range manifest.Parts {
+			partPath := filepath.Join(dir, partASIN+".m4b")
+			if !fileExistsFS(a.FS, partPath) {
+				allConverted = false
+				break
+			}
+			partPaths = append(partPaths, partPath)
+		}
+		if !allConverted {
+			continue
+		}
+
+		outputPath := filepath.Join(dir, manifest.OutputBase+".m4b")
+		listPath := filepath.Join(dir, manifest.ASIN+"-concat.txt")
+
+		var listBuilder strings.Builder
+		for _, partPath := range partPaths {
+			absPartPath, err := filepath.Abs(partPath)
+			if err != nil {
+				return fmt.Errorf("failed to resolve absolute path for %s: %w", partPath, err)
+			}
+			fmt.Fprintf(&listBuilder, "file '%s'\n", absPartPath)
+		}
+		if err := a.FS.WriteFile(listPath, []byte(listBuilder.String()), 0o644); err != nil {
+			return fmt.Errorf("failed to write concat list for %s: %w", manifest.ASIN, err)
+		}
+
+		fmt.Printf("Merging %d parts -> %s\n", len(partPaths), outputPath)
+		if err := a.Converter.ConcatM4B(ctx, listPath, outputPath); err != nil {
+			return fmt.Errorf("failed to merge parts for %s: %w", manifest.ASIN, err)
+		}
+
+		if err := a.FS.Remove(listPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to remove concat list %s: %v\n", listPath, err)
+		}
+		for _, partPath := range partPaths {
+			if err := a.FS.Remove(partPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to remove merged part %s: %v\n", partPath, err)
+			}
+		}
+		if err := a.FS.Remove(manifestPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to remove part manifest %s: %v\n", manifestPath, err)
+		}
+	}
+
+	return nil
+}
+
+func conversionOutputPath(inputPath string) string {
+	dir := filepath.Dir(inputPath)
+	stem := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+	return filepath.Join(dir, stripAudibleQualitySuffix(stem)+".m4b")
+}
+
+func stripAudibleQualitySuffix(stem string) string {
+	chapterSuffix := ""
+	if strings.HasSuffix(stem, "-chapters") {
+		stem = strings.TrimSuffix(stem, "-chapters")
+		chapterSuffix = "-chapters"
+	}
+
+	if idx := strings.LastIndex(stem, "-LC_"); idx >= 0 {
+		return stem[:idx] + chapterSuffix
+	}
+	if idx := strings.LastIndex(stem, "-AAX_"); idx >= 0 {
+		return stem[:idx] + chapterSuffix
+	}
+
+	return stem + chapterSuffix
 }
 
 func (a *App) loadVoucherKeyIV(voucherPath string) (string, string, error) {

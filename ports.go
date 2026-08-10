@@ -13,12 +13,19 @@ type AudibleService interface {
 	ExportLibrary(ctx context.Context) ([]Book, error)
 	DownloadBook(ctx context.Context, asin, outputDir string) error
 	GetActivationBytes(ctx context.Context) (string, error)
+	// GetAudioParts returns the ordered part ASINs for a book that Audible
+	// splits into multiple AudioPart items. Returns an empty slice for
+	// normal, single-file books.
+	GetAudioParts(ctx context.Context, asin string) ([]string, error)
 }
 
 // MediaConverter abstracts ffmpeg conversions.
 type MediaConverter interface {
 	ConvertAAX(ctx context.Context, inputPath, outputPath, activationBytes string) error
 	ConvertAAXC(ctx context.Context, inputPath, outputPath, key, iv string) error
+	// ConcatM4B losslessly concatenates ordered .m4b part files into a
+	// single output file.
+	ConcatM4B(ctx context.Context, listPath, outputPath string) error
 }
 
 // FileSystem abstracts OS file operations for testability.

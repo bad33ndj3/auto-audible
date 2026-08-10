@@ -222,6 +222,48 @@ func TestRenameDownloadedFiles(t *testing.T) {
 	}
 }
 
+func TestRenameDownloadedFilesStripsAudibleQualitySuffix(t *testing.T) {
+	dir := t.TempDir()
+
+	files := []string{
+		"B003-LC_128_44100_stereo.aaxc",
+		"B003-LC_128_44100_stereo.voucher",
+		"B003-LC_128_44100_stereo-chapters.json",
+		"B003-AAX_44_128.aax",
+	}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("create file %s: %v", name, err)
+		}
+	}
+
+	app := &App{FS: &osFS{}}
+	if err := app.renameDownloadedFiles(dir, "B003", "The Book of Joy", false, nil); err != nil {
+		t.Fatalf("renameDownloadedFiles failed: %v", err)
+	}
+
+	expected := []string{
+		"The Book of Joy.aaxc",
+		"The Book of Joy.voucher",
+		"The Book of Joy-chapters.json",
+		"The Book of Joy.aax",
+	}
+	for _, name := range expected {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected file %s to exist: %v", name, err)
+		}
+	}
+}
+
+func TestConversionOutputPathStripsAudibleQualitySuffix(t *testing.T) {
+	got := conversionOutputPath(filepath.Join("media", "The Book of Joy-LC_128_44100_stereo.aaxc"))
+	want := filepath.Join("media", "The Book of Joy.m4b")
+	if got != want {
+		t.Fatalf("conversionOutputPath() = %q, want %q", got, want)
+	}
+}
+
 func TestRenameDownloadedFilesWithSeries(t *testing.T) {
 	dir := t.TempDir()
 

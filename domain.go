@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -27,6 +28,19 @@ type MediaInfo struct {
 	HasM4B  bool
 	HasAAX  bool
 	HasAAXC bool
+}
+
+// partsManifest records the ordered part ASINs Audible split a book's
+// audio into, so the converted .m4b parts can be merged back together.
+type partsManifest struct {
+	ASIN       string   `json:"asin"`
+	Title      string   `json:"title"`
+	Parts      []string `json:"parts"`
+	OutputBase string   `json:"output_base"`
+}
+
+func partsManifestPath(dir, asin string) string {
+	return filepath.Join(dir, asin+"-parts.json")
 }
 
 var activationBytesPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}$`)
