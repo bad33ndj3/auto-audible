@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -323,29 +322,13 @@ func TestRun_NoCommand(t *testing.T) {
 }
 
 func TestRun_StatusTableFlag(t *testing.T) {
-	err := run(context.Background(), []string{"status", "-table"})
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			t.Fatal("did not expect flag help error")
-		}
-		// The error should NOT be about undefined flags
-		if contains(err.Error(), "flag provided but not defined") {
-			t.Fatalf("unexpected flag error: %v", err)
-		}
+	cmd := buildCommands()["status"]
+	fs := flag.NewFlagSet(cmd.Name, flag.ContinueOnError)
+	cmd.Setup(fs)
+	if err := fs.Parse([]string{"-table"}); err != nil {
+		t.Fatalf("parse status flags: %v", err)
 	}
-	// If audible-cli is configured, this may succeed. The key assertion is
-	// that it does not fail with a flag-parsing error.
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsInternal(s, substr))
-}
-
-func containsInternal(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	if fs.Lookup("table").Value.String() != "true" {
+		t.Fatal("expected -table to be true")
 	}
-	return false
 }
