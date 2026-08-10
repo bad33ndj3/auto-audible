@@ -296,6 +296,25 @@ func TestRenameDownloadedFilesWithSeries(t *testing.T) {
 	}
 }
 
+func TestRenameDownloadedFilesLeavesSidecarsTogetherOnCollision(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"B004.aaxc", "B004.voucher", "Existing Book.aaxc"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("create file %s: %v", name, err)
+		}
+	}
+
+	app := &App{FS: &osFS{}}
+	if err := app.renameDownloadedFiles(dir, "B004", "Existing Book", false, nil); err == nil {
+		t.Fatal("expected target collision")
+	}
+	for _, name := range []string{"B004.aaxc", "B004.voucher"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected source %s to remain: %v", name, err)
+		}
+	}
+}
+
 // === New CLI tests ===
 
 func TestRun_HelpCommand(t *testing.T) {

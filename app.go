@@ -217,6 +217,14 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 	}
 
 	sanitizedTitle := sanitizeFileName(title)
+	type renamePlan struct {
+		oldName string
+		newName string
+		oldPath string
+		newPath string
+	}
+	plans := make([]renamePlan, 0, len(files))
+	targets := make(map[string]struct{}, len(files))
 
 	for _, file := range files {
 		name := file.Name()
@@ -239,31 +247,24 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 		}
 
 		newName := stripAudibleQualitySuffix(prefix+sanitizedTitle+suffix) + ext
-
-		newPath := filepath.Join(outputDir, newName)
-		if fileExistsFS(a.FS, newPath) && name != newName {
-			counter := 1
-			for {
-				altName := prefix + sanitizedTitle + fmt.Sprintf("_%d", counter) + ext
-				altPath := filepath.Join(outputDir, altName)
-				if !fileExistsFS(a.FS, altPath) {
-					newName = altName
-					newPath = altPath
-					break
-				}
-				counter++
-				if counter > 100 {
-					return fmt.Errorf("could not find unique name for %s", name)
-				}
-			}
-		}
-
-		oldPath := filepath.Join(outputDir, name)
 		if name == newName {
 			continue
 		}
-		if err := a.FS.Rename(oldPath, newPath); err != nil {
-			return fmt.Errorf("failed to rename %s to %s: %w", name, newName, err)
+		oldPath := filepath.Join(outputDir, name)
+		newPath := filepath.Join(outputDir, newName)
+		if fileExistsFS(a.FS, newPath) {
+			return fmt.Errorf("cannot rename %s: target %s already exists", name, newName)
+		}
+		if _, exists := targets[newPath]; exists {
+			return fmt.Errorf("cannot rename %s: multiple files target %s", name, newName)
+		}
+		targets[newPath] = struct{}{}
+		plans = append(plans, renamePlan{oldName: name, newName: newName, oldPath: oldPath, newPath: newPath})
+	}
+
+	for _, plan := range plans {
+		if err := a.FS.Rename(plan.oldPath, plan.newPath); err != nil {
+			return fmt.Errorf("failed to rename %s to %s: %w", plan.oldName, plan.newName, err)
 		}
 	}
 
