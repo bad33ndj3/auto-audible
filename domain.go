@@ -61,6 +61,9 @@ func sanitizeFileName(name string) string {
 	name = replacer.Replace(name)
 	name = whitespacePattern.ReplaceAllString(name, " ")
 	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return "_"
+	}
 	return name
 }
 

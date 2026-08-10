@@ -156,6 +156,9 @@ func TestSanitizeFileName(t *testing.T) {
 		{"A/B Testing", "A-B Testing"},
 		{"File*Name?", "FileName"},
 		{"  Multiple   Spaces  ", "Multiple Spaces"},
+		{"..", "_"},
+		{".", "_"},
+		{"", "_"},
 	}
 
 	for _, tt := range tests {
