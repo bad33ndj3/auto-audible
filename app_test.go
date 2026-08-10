@@ -702,6 +702,21 @@ func TestEnsureAudibleConfigured_AlreadyConfigured(t *testing.T) {
 	}
 }
 
+func TestEnsureAudibleConfigured_ReturnsProfileInspectionError(t *testing.T) {
+	wantErr := errors.New("broken audible config")
+	app := &App{
+		Audible:     &fakeAudible{hasProfileErr: wantErr},
+		Prompter:    &fakePrompter{},
+		lookPath:    func(string) (string, error) { return "/usr/bin/audible", nil },
+		interactive: func() bool { return true },
+	}
+
+	err := app.EnsureAudibleConfigured(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected profile error, got %v", err)
+	}
+}
+
 func TestEnsureAudibleConfigured_PromptsForQuickstart(t *testing.T) {
 	audible := &fakeAudible{hasProfile: false}
 	app := &App{

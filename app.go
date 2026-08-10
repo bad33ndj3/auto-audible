@@ -35,7 +35,10 @@ func (a *App) EnsureAudibleConfigured(ctx context.Context) error {
 	}
 
 	hasProfiles, err := a.Audible.HasProfile(ctx)
-	if err == nil && hasProfiles {
+	if err != nil {
+		return fmt.Errorf("failed to inspect audible-cli profiles: %w", err)
+	}
+	if hasProfiles {
 		return nil
 	}
 
