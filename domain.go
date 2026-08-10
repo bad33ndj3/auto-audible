@@ -44,7 +44,6 @@ func partsManifestPath(dir, asin string) string {
 }
 
 var activationBytesPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}$`)
-var whitespacePattern = regexp.MustCompile(`\s+`)
 
 func sanitizeFileName(name string) string {
 	replacer := strings.NewReplacer(
@@ -59,8 +58,7 @@ func sanitizeFileName(name string) string {
 		"|", "-",
 	)
 	name = replacer.Replace(name)
-	name = whitespacePattern.ReplaceAllString(name, " ")
-	name = strings.TrimSpace(name)
+	name = strings.Join(strings.Fields(name), " ")
 	if name == "" || name == "." || name == ".." {
 		return "_"
 	}
@@ -153,20 +151,6 @@ func printStatusTable(rows [][3]string) {
 	for _, row := range rows {
 		fmt.Printf("%-*s  %-*s  %-*s\n", asinWidth, row[0], titleWidth, row[1], stateWidth, row[2])
 	}
-}
-
-func parseLibraryJSON(fs FileSystem, filename string) ([]string, error) {
-	items, err := parseLibraryItemsJSON(fs, filename)
-	if err != nil {
-		return nil, err
-	}
-
-	asins := make([]string, 0, len(items))
-	for _, item := range items {
-		asins = append(asins, item.ASIN)
-	}
-
-	return asins, nil
 }
 
 func parseLibraryItemsJSON(fs FileSystem, filename string) ([]Book, error) {

@@ -163,7 +163,6 @@ func (a *App) Download(ctx context.Context) error {
 
 				mu.Lock()
 				downloaded = append(downloaded, asin)
-				downloadedSet[asin] = struct{}{}
 				if err := a.Store.Save(downloaded); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
 					failed++

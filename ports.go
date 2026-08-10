@@ -38,7 +38,6 @@ type FileSystem interface {
 	Remove(name string) error
 	Stat(name string) (os.FileInfo, error)
 	WalkDir(root string, fn fs.WalkDirFunc) error
-	CreateTemp(dir, pattern string) (*os.File, error)
 }
 
 // Prompter abstracts interactive user prompts.

@@ -165,10 +165,6 @@ func (f *fakeFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	}
 	return nil
 }
-func (f *fakeFS) CreateTemp(dir, pattern string) (*os.File, error) {
-	return nil, errors.New("not implemented")
-}
-
 func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }

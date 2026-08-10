@@ -11,7 +11,7 @@ import (
 
 // === Existing domain/adapter tests ===
 
-func TestParseLibraryJSON(t *testing.T) {
+func TestParseLibraryItemsJSON(t *testing.T) {
 	tempDir := t.TempDir()
 	path := filepath.Join(tempDir, "library.json")
 	contents := `[
@@ -26,14 +26,14 @@ func TestParseLibraryJSON(t *testing.T) {
 		t.Fatalf("write temp library: %v", err)
 	}
 
-	asins, err := parseLibraryJSON(&osFS{}, path)
+	items, err := parseLibraryItemsJSON(&osFS{}, path)
 	if err != nil {
-		t.Fatalf("parseLibraryJSON returned error: %v", err)
+		t.Fatalf("parseLibraryItemsJSON returned error: %v", err)
 	}
 
-	want := []string{"B001", "B002"}
-	if !reflect.DeepEqual(asins, want) {
-		t.Fatalf("unexpected asins: got %v want %v", asins, want)
+	want := []Book{{ASIN: "B001"}, {ASIN: "B002"}}
+	if !reflect.DeepEqual(items, want) {
+		t.Fatalf("unexpected items: got %v want %v", items, want)
 	}
 }
 
