@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -37,6 +38,36 @@ func TestParseLibraryItemsJSON(t *testing.T) {
 	}
 }
 
+func TestParseLibraryItemsJSONPreservesSeriesMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.json")
+	contents := `[{"asin":"B001","title":"A Memory of Light","series_title":"The Wheel of Time","series_sequence":"14"}]`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := parseLibraryItemsJSON(&osFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SeriesTitle != "The Wheel of Time" || items[0].SeriesSequence != "14" {
+		t.Fatalf("series metadata was not preserved: %+v", items)
+	}
+}
+
+func TestSeriesSequenceKeepsFractionalPosition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.json")
+	if err := os.WriteFile(path, []byte(`[{"asin":"B001","series_sequence":1.5}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	items, err := parseLibraryItemsJSON(&osFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := formatPrefix(items[0].SeriesSequence); got != "01.5 - " {
+		t.Fatalf("formatPrefix() = %q, want %q", got, "01.5 - ")
+	}
+}
+
 func TestParseLibraryItemsJSONRejectsUnsafeASIN(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "library.json")
 	if err := os.WriteFile(path, []byte(`[{"asin":"../B001"}]`), 0o644); err != nil {
@@ -64,6 +95,39 @@ func TestAudibleArgsSkipsEmptyPassword(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected args: got %v want %v", got, want)
+	}
+}
+
+func TestDownloadDoesNotHideAudibleErrors(t *testing.T) {
+	if slices.Contains(audibleDownloadArgs("B001", "media"), "--ignore-errors") {
+		t.Fatal("download must fail instead of recording an incomplete book")
+	}
+}
+
+func TestStoreIsScopedToMediaDirectory(t *testing.T) {
+	store := newJSONASINStore(filepath.Join("library", "audible"))
+	want := filepath.Join("library", "audible", ".auto-audible.json")
+	if store.path != want {
+		t.Fatalf("state path = %q, want %q", store.path, want)
+	}
+}
+
+func TestStorePersistsOnlyInItsMediaDirectory(t *testing.T) {
+	mediaDir := t.TempDir()
+	store := newJSONASINStore(mediaDir)
+	if err := store.Save([]string{"B002", "B001"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"B001", "B002"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("state = %v, want %v", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(mediaDir, ".auto-audible.json")); err != nil {
+		t.Fatalf("state file was not written in media directory: %v", err)
 	}
 }
 
@@ -182,14 +246,15 @@ func TestSanitizeFileName(t *testing.T) {
 
 func TestFormatPrefix(t *testing.T) {
 	tests := []struct {
-		seq  interface{}
+		seq  SeriesSequence
 		want string
 	}{
-		{nil, ""},
-		{float64(1), "01 - "},
-		{float64(15), "15 - "},
+		{"", ""},
+		{"1", "01 - "},
+		{"10", "10 - "},
+		{"15", "15 - "},
 		{"3", "03 - "},
-		{float64(0), ""},
+		{"0", ""},
 		{"", ""},
 	}
 
@@ -217,7 +282,7 @@ func TestRenameDownloadedFiles(t *testing.T) {
 	}
 
 	app := &App{FS: &osFS{}}
-	if err := app.renameDownloadedFiles(dir, "B001", "My Book: Title", false, nil); err != nil {
+	if err := app.renameDownloadedFiles(dir, "B001", "My Book: Title", false, ""); err != nil {
 		t.Fatalf("renameDownloadedFiles failed: %v", err)
 	}
 
@@ -251,7 +316,7 @@ func TestRenameDownloadedFilesStripsAudibleQualitySuffix(t *testing.T) {
 	}
 
 	app := &App{FS: &osFS{}}
-	if err := app.renameDownloadedFiles(dir, "B003", "The Book of Joy", false, nil); err != nil {
+	if err := app.renameDownloadedFiles(dir, "B003", "The Book of Joy", false, ""); err != nil {
 		t.Fatalf("renameDownloadedFiles failed: %v", err)
 	}
 
@@ -291,7 +356,7 @@ func TestRenameDownloadedFilesWithSeries(t *testing.T) {
 	}
 
 	app := &App{FS: &osFS{}}
-	if err := app.renameDownloadedFiles(dir, "B002", "Armor World", true, float64(15)); err != nil {
+	if err := app.renameDownloadedFiles(dir, "B002", "Armor World", true, "15"); err != nil {
 		t.Fatalf("renameDownloadedFiles failed: %v", err)
 	}
 
@@ -316,7 +381,7 @@ func TestRenameDownloadedFilesLeavesSidecarsTogetherOnCollision(t *testing.T) {
 	}
 
 	app := &App{FS: &osFS{}}
-	if err := app.renameDownloadedFiles(dir, "B004", "Existing Book", false, nil); err == nil {
+	if err := app.renameDownloadedFiles(dir, "B004", "Existing Book", false, ""); err == nil {
 		t.Fatal("expected target collision")
 	}
 	for _, name := range []string{"B004.aaxc", "B004.voucher"} {
@@ -363,5 +428,15 @@ func TestRun_StatusTableFlag(t *testing.T) {
 	}
 	if fs.Lookup("table").Value.String() != "true" {
 		t.Fatal("expected -table to be true")
+	}
+}
+
+func TestCommandsKeepAllAsASyncAlias(t *testing.T) {
+	commands := buildCommands()
+	if _, ok := commands["sync"]; !ok {
+		t.Fatal("missing sync command")
+	}
+	if command, ok := commands["all"]; !ok || command.Desc != "Deprecated alias for sync" {
+		t.Fatal("all must remain a documented migration alias for sync")
 	}
 }

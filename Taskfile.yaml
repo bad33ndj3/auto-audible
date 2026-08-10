@@ -15,6 +15,16 @@ tasks:
     cmds:
       - go run . download {{.CLI_ARGS}}
 
+  sync:
+    desc: Download, convert, and safely clean completed books on the host
+    cmds:
+      - go run . sync {{.CLI_ARGS}}
+
+  all:
+    desc: Deprecated alias for sync
+    cmds:
+      - task sync {{.CLI_ARGS}}
+
   convert:
     desc: Convert downloaded AAX files on the host
     cmds:
@@ -35,17 +45,17 @@ tasks:
     cmds:
       - go run . status {{.CLI_ARGS}}
 
-  all:
-    desc: Download and convert on the host
-    cmds:
-      - go run . all {{.CLI_ARGS}}
-
   docker-build:
     desc: Build the Docker image
     cmds:
       - docker build -t {{.IMAGE}} .
 
-  docker-all:
-    desc: Download and convert in Docker
+  docker-sync:
+    desc: Synchronize Audible in Docker
     cmds:
-      - docker run --rm -it -v "${AUDIBLE_CONFIG_DIR:-$HOME/.audible}:/root/.audible" -v "$PWD:/work" -w /work {{.IMAGE}} all {{.CLI_ARGS}}
+      - docker run --rm -it -v "${AUDIBLE_CONFIG_DIR:-$HOME/.audible}:/root/.audible" -v "$PWD:/work" -w /work {{.IMAGE}} sync {{.CLI_ARGS}}
+
+  docker-all:
+    desc: Deprecated alias for docker-sync
+    cmds:
+      - task docker-sync {{.CLI_ARGS}}

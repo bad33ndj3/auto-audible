@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -105,13 +106,16 @@ func (a *audibleCLI) ExportLibrary(ctx context.Context) ([]Book, error) {
 }
 
 func (a *audibleCLI) DownloadBook(ctx context.Context, asin, outputDir string) error {
-	return a.run(ctx,
+	return a.run(ctx, audibleDownloadArgs(asin, outputDir)...)
+}
+
+func audibleDownloadArgs(asin, outputDir string) []string {
+	return []string{
 		"download",
 		"--asin", asin,
 		"--output-dir", outputDir,
 		"--filename-mode", "asin_only",
 		"-y",
-		"--ignore-errors",
 		"--aax-fallback",
 		"--timeout", "5000",
 		"--pdf",
@@ -120,7 +124,7 @@ func (a *audibleCLI) DownloadBook(ctx context.Context, asin, outputDir string) e
 		"-q", "high",
 		"--overwrite",
 		"--ignore-podcasts",
-	)
+	}
 }
 
 // audioPartsResponse is the shape of `audible api library` responses.
@@ -264,18 +268,36 @@ func (o *osFS) WalkDir(root string, fn fs.WalkDirFunc) error { return filepath.W
 
 // jsonASINStore persists downloaded ASINs to a JSON file.
 type jsonASINStore struct {
-	path string
+	path       string
+	legacyPath string
 }
 
-func newJSONASINStore(path string) *jsonASINStore {
-	return &jsonASINStore{path: path}
+func newJSONASINStore(mediaDir string) *jsonASINStore {
+	store := &jsonASINStore{path: filepath.Join(mediaDir, ".auto-audible.json")}
+	if filepath.Clean(mediaDir) == "media" {
+		store.legacyPath = legacyDownloadedASINsPath
+	}
+	return store
 }
 
 func (s *jsonASINStore) Load() ([]string, error) {
-	if _, err := os.Stat(s.path); os.IsNotExist(err) {
-		return []string{}, nil
+	path := s.path
+	if _, err := os.Stat(path); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		if s.legacyPath == "" {
+			return nil, nil
+		}
+		path = s.legacyPath
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
 	}
-	data, err := os.ReadFile(s.path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -287,11 +309,34 @@ func (s *jsonASINStore) Load() ([]string, error) {
 }
 
 func (s *jsonASINStore) Save(asins []string) error {
+	asins = append([]string(nil), asins...)
+	sort.Strings(asins)
 	data, err := json.MarshalIndent(asins, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".auto-audible-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, s.path)
 }
 
 // stdinPrompter reads yes/no answers from stdin.

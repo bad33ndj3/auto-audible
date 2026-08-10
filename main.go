@@ -11,15 +11,13 @@ import (
 	"text/tabwriter"
 )
 
-const downloadedAsinsPath = "downloaded_asins.json"
-const defaultDownloadWorkers = 1
+const legacyDownloadedASINsPath = "downloaded_asins.json"
 
 // globalFlags are shared across all commands.
 type globalFlags struct {
 	MediaDir string
 	Password string
 	Profile  string
-	Workers  int
 }
 
 // cmdSpec defines a single CLI command.
@@ -77,7 +75,6 @@ func run(ctx context.Context, args []string) error {
 	fs.StringVar(&globals.MediaDir, "media-dir", "media", "media directory")
 	fs.StringVar(&globals.Password, "password", "", "audible auth-file password")
 	fs.StringVar(&globals.Profile, "profile", "", "audible-cli profile")
-	fs.IntVar(&globals.Workers, "workers", defaultDownloadWorkers, "number of parallel downloads")
 
 	if cmd.Setup != nil {
 		cmd.Setup(fs)
@@ -91,13 +88,12 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	app := &App{
-		Audible:         newAudibleCLI(globals.Profile, globals.Password),
-		Converter:       newFFmpegConverter(),
-		FS:              newOSFS(),
-		Store:           newJSONASINStore(downloadedAsinsPath),
-		Prompter:        newStdinPrompter(),
-		MediaDir:        globals.MediaDir,
-		DownloadWorkers: globals.Workers,
+		Audible:   newAudibleCLI(globals.Profile, globals.Password),
+		Converter: newFFmpegConverter(),
+		FS:        newOSFS(),
+		Store:     newJSONASINStore(globals.MediaDir),
+		Prompter:  newStdinPrompter(),
+		MediaDir:  globals.MediaDir,
 	}
 
 	if cmd.NeedsAudible {
@@ -110,7 +106,7 @@ func run(ctx context.Context, args []string) error {
 }
 
 func buildCommands() map[string]cmdSpec {
-	return map[string]cmdSpec{
+	commands := map[string]cmdSpec{
 		"download": {
 			Name:         "download",
 			Desc:         "Export library and download new titles",
@@ -161,21 +157,39 @@ func buildCommands() map[string]cmdSpec {
 				return app.ReadySummary()
 			},
 		},
-		"all": {
-			Name:         "all",
-			Desc:         "Run download and convert",
+		"sync": {
+			Name:         "sync",
+			Desc:         "Download, convert, and safely clean new titles",
 			NeedsAudible: true,
 			Run: func(ctx context.Context, app *App, _ *flag.FlagSet) error {
-				if err := app.Download(ctx); err != nil {
-					return fmt.Errorf("download failed: %w", err)
-				}
-				if err := app.Convert(ctx); err != nil {
-					return fmt.Errorf("convert failed: %w", err)
-				}
-				return app.ReadySummary()
+				return sync(ctx, app)
 			},
 		},
 	}
+	commands["all"] = cmdSpec{
+		Name:         "all",
+		Desc:         "Deprecated alias for sync",
+		NeedsAudible: true,
+		Run:          commands["sync"].Run,
+	}
+	return commands
+}
+
+func sync(ctx context.Context, app *App) error {
+	var errs []error
+	if err := app.Download(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("download failed: %w", err))
+	}
+	if err := app.Convert(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("convert failed: %w", err))
+	}
+	if err := app.Clean(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("clean failed: %w", err))
+	}
+	if err := app.ReadySummary(); err != nil {
+		errs = append(errs, fmt.Errorf("ready summary failed: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 func printUsage(commands map[string]cmdSpec) {
@@ -193,7 +207,6 @@ func printUsage(commands map[string]cmdSpec) {
 	fmt.Fprintln(os.Stderr, "  -media-dir string    media directory (default \"media\")")
 	fmt.Fprintln(os.Stderr, "  -password string     audible auth-file password")
 	fmt.Fprintln(os.Stderr, "  -profile string      audible-cli profile")
-	fmt.Fprintf(os.Stderr, "  -workers int         number of parallel downloads (default %d)\n", defaultDownloadWorkers)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Run 'auto-audible help <command>' for details.")
 }
@@ -206,7 +219,6 @@ func printCommandHelp(cmd cmdSpec) {
 	fs.String("media-dir", "media", "media directory")
 	fs.String("password", "", "audible auth-file password")
 	fs.String("profile", "", "audible-cli profile")
-	fs.Int("workers", defaultDownloadWorkers, "number of parallel downloads")
 	if cmd.Setup != nil {
 		cmd.Setup(fs)
 	}
@@ -224,7 +236,7 @@ func hasFlags(fs *flag.FlagSet) bool {
 }
 
 func commandOrder(commands map[string]cmdSpec) []string {
-	order := []string{"download", "convert", "clean", "status", "ready", "all"}
+	order := []string{"sync", "status", "download", "convert", "clean", "ready"}
 	result := make([]string, 0, len(commands))
 	for _, name := range order {
 		if _, ok := commands[name]; ok {

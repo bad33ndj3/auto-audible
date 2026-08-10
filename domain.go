@@ -8,12 +8,35 @@ import (
 	"strings"
 )
 
+type SeriesSequence string
+
+var seriesSequencePattern = regexp.MustCompile(`^\d+(\.\d+)?$`)
+
+func (s *SeriesSequence) UnmarshalJSON(data []byte) error {
+	value := strings.TrimSpace(string(data))
+	if value == "null" {
+		*s = ""
+		return nil
+	}
+	if strings.HasPrefix(value, `"`) {
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+	}
+	value = strings.TrimSpace(value)
+	if value != "" && !seriesSequencePattern.MatchString(value) {
+		return fmt.Errorf("invalid series sequence %q", value)
+	}
+	*s = SeriesSequence(value)
+	return nil
+}
+
 // Book represents an Audible library item.
 type Book struct {
-	ASIN           string
-	Title          string
-	SeriesTitle    string
-	SeriesSequence interface{}
+	ASIN           string         `json:"asin"`
+	Title          string         `json:"title"`
+	SeriesTitle    string         `json:"series_title"`
+	SeriesSequence SeriesSequence `json:"series_sequence"`
 }
 
 // MediaState tracks which books are ready or need conversion.
@@ -70,23 +93,28 @@ func sanitizeFileName(name string) string {
 	return name
 }
 
-func formatPrefix(seq interface{}) string {
-	if seq == nil {
+func formatPrefix(seq SeriesSequence) string {
+	parts := strings.SplitN(string(seq), ".", 2)
+	if len(parts) == 0 || parts[0] == "" {
 		return ""
 	}
-	var n int
-	switch v := seq.(type) {
-	case float64:
-		n = int(v)
-	case string:
-		fmt.Sscanf(v, "%d", &n)
-	default:
+	parts[0] = strings.TrimLeft(parts[0], "0")
+	if parts[0] == "" {
+		parts[0] = "0"
+	}
+	if len(parts) == 2 {
+		parts[1] = strings.TrimRight(parts[1], "0")
+		if parts[1] == "" {
+			parts = parts[:1]
+		}
+	}
+	if len(parts) == 1 && parts[0] == "0" {
 		return ""
 	}
-	if n <= 0 {
-		return ""
+	if len(parts[0]) == 1 {
+		parts[0] = "0" + parts[0]
 	}
-	return fmt.Sprintf("%02d - ", n)
+	return strings.Join(parts, ".") + " - "
 }
 
 func extractActivationBytes(output string) string {

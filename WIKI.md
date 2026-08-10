@@ -50,7 +50,7 @@ It is intended as a handover artifact for future AI agents.
 - If profiles exist, wrapper can proceed non-interactively.
 
 ### Impact on this repo
-- Wrapper should verify setup before `download`/`convert`/`status`/`all`.
+- Wrapper should verify setup before `sync`/`download`/`convert`/`status`.
 - Interactive flows may offer to run `audible quickstart`.
 
 ### Source
@@ -133,7 +133,7 @@ Auth-file password is optional from wrapper perspective:
 - `not_downloaded`
 
 ### Why these states
-They separate library bookkeeping (`downloaded_asins.json`) from actual on-disk media readiness.
+They separate destination-scoped library bookkeeping (`<media-dir>/.auto-audible.json`) from actual on-disk media readiness.
 
 ---
 
@@ -156,7 +156,7 @@ docker run --rm --entrypoint sh auto-audible -lc "ffmpeg -hide_banner -h demuxer
 ```bash
 go run . status --profile audible
 go run . status --profile audible --table
-go run . all --profile audible
+go run . sync --profile audible
 ```
 
 ---
