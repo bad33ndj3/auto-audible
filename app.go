@@ -288,6 +288,8 @@ func (a *App) Convert(ctx context.Context) error {
 		return fmt.Errorf("failed to list .aaxc files: %w", err)
 	}
 
+	aaxFiles = pendingConversionFiles(a.FS, aaxFiles)
+	aaxcFiles = pendingConversionFiles(a.FS, aaxcFiles)
 	if len(aaxFiles) == 0 && len(aaxcFiles) == 0 {
 		fmt.Println("No .aax or .aaxc files found to convert")
 	}
@@ -305,6 +307,7 @@ func (a *App) Convert(ctx context.Context) error {
 		outputPath := conversionOutputPath(inputPath)
 		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
 		if err := a.Converter.ConvertAAX(ctx, inputPath, outputPath, activationBytes); err != nil {
+			_ = a.FS.Remove(outputPath)
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
 		}
@@ -323,6 +326,7 @@ func (a *App) Convert(ctx context.Context) error {
 
 		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
 		if err := a.Converter.ConvertAAXC(ctx, inputPath, outputPath, key, iv); err != nil {
+			_ = a.FS.Remove(outputPath)
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
 		}
@@ -417,6 +421,16 @@ func conversionOutputPath(inputPath string) string {
 	dir := filepath.Dir(inputPath)
 	stem := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 	return filepath.Join(dir, stripAudibleQualitySuffix(stem)+".m4b")
+}
+
+func pendingConversionFiles(fs FileSystem, files []string) []string {
+	pending := files[:0]
+	for _, inputPath := range files {
+		if !fileExistsFS(fs, conversionOutputPath(inputPath)) {
+			pending = append(pending, inputPath)
+		}
+	}
+	return pending
 }
 
 func stripAudibleQualitySuffix(stem string) string {

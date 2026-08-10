@@ -69,10 +69,15 @@ type fakeConverter struct {
 	aaxErr      error
 	aaxcErr     error
 	concatErr   error
+	fs          *fakeFS
+	writeOutput bool
 }
 
 func (f *fakeConverter) ConvertAAX(ctx context.Context, inputPath, outputPath, activationBytes string) error {
 	f.aaxCalls = append(f.aaxCalls, struct{ input, output, bytes string }{inputPath, outputPath, activationBytes})
+	if f.writeOutput {
+		f.fs.files[outputPath] = []byte("partial")
+	}
 	return f.aaxErr
 }
 func (f *fakeConverter) ConvertAAXC(ctx context.Context, inputPath, outputPath, key, iv string) error {
@@ -445,6 +450,47 @@ func TestConvert_CallsConverterWithActivationBytes(t *testing.T) {
 	}
 	if converter.aaxcCalls[0].key != "key1" {
 		t.Fatalf("unexpected key: %s", converter.aaxcCalls[0].key)
+	}
+}
+
+func TestConvert_SkipsExistingOutput(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/book.aax"] = []byte("aax data")
+	fs.files["media/book.m4b"] = []byte("finished")
+	converter := &fakeConverter{}
+	app := &App{
+		Audible:   &fakeAudible{},
+		Converter: converter,
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+
+	if err := app.Convert(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(converter.aaxCalls) != 0 {
+		t.Fatal("expected existing output to be preserved")
+	}
+}
+
+func TestConvert_RemovesFailedOutput(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/book.aax"] = []byte("aax data")
+	converter := &fakeConverter{fs: fs, writeOutput: true, aaxErr: errors.New("conversion failed")}
+	app := &App{
+		Audible:   &fakeAudible{activationBytes: "a1b2c3d4"},
+		Converter: converter,
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+
+	if err := app.Convert(context.Background()); err == nil {
+		t.Fatal("expected conversion failure")
+	}
+	if _, ok := fs.files["media/book.m4b"]; ok {
+		t.Fatal("expected partial output to be removed")
 	}
 }
 
