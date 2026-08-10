@@ -582,6 +582,14 @@ func TestConvert_SkipsMergeWhenPartsIncomplete(t *testing.T) {
 	}
 }
 
+func TestEscapeFFconcatPath(t *testing.T) {
+	got := escapeFFconcatPath("/media/Reader's Series/part.m4b")
+	want := "/media/Reader'\\''s Series/part.m4b"
+	if got != want {
+		t.Fatalf("unexpected escaped path: got %q want %q", got, want)
+	}
+}
+
 func TestConvert_ReturnsErrorWhenFfmpegMissing(t *testing.T) {
 	app := &App{
 		lookPath: func(string) (string, error) { return "", errors.New("not found") },

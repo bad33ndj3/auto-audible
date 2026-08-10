@@ -390,7 +390,7 @@ func (a *App) mergeParts(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("failed to resolve absolute path for %s: %w", partPath, err)
 			}
-			fmt.Fprintf(&listBuilder, "file '%s'\n", absPartPath)
+			fmt.Fprintf(&listBuilder, "file '%s'\n", escapeFFconcatPath(absPartPath))
 		}
 		if err := a.FS.WriteFile(listPath, []byte(listBuilder.String()), 0o644); err != nil {
 			return fmt.Errorf("failed to write concat list for %s: %w", manifest.ASIN, err)
@@ -415,6 +415,10 @@ func (a *App) mergeParts(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func escapeFFconcatPath(path string) string {
+	return strings.ReplaceAll(path, "'", "'\\''")
 }
 
 func conversionOutputPath(inputPath string) string {
