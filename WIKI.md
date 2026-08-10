@@ -155,7 +155,7 @@ docker run --rm --entrypoint sh auto-audible -lc "ffmpeg -hide_banner -h demuxer
 ### Wrapper checks
 ```bash
 go run . status --profile audible
-go run . status --profile audible --status-table
+go run . status --profile audible --table
 go run . all --profile audible
 ```
 

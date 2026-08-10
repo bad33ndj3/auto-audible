@@ -35,7 +35,10 @@ func (a *App) EnsureAudibleConfigured(ctx context.Context) error {
 	}
 
 	hasProfiles, err := a.Audible.HasProfile(ctx)
-	if err == nil && hasProfiles {
+	if err != nil {
+		return fmt.Errorf("failed to inspect audible-cli profiles: %w", err)
+	}
+	if hasProfiles {
 		return nil
 	}
 
@@ -131,6 +134,7 @@ func (a *App) Download(ctx context.Context) error {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	jobCh := make(chan job)
+	failed := 0
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -143,22 +147,31 @@ func (a *App) Download(ctx context.Context) error {
 				fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
 				if err := a.Audible.DownloadBook(ctx, asin, j.outputDir); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
+					mu.Lock()
+					failed++
+					mu.Unlock()
 					continue
 				}
 
+				jobFailed := false
 				if err := a.renameDownloadedFiles(j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
+					jobFailed = true
 				}
 
 				if err := a.writePartsManifestIfSplit(ctx, j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to record audio parts for ASIN %s: %v\n", asin, err)
+					jobFailed = true
 				}
 
 				mu.Lock()
 				downloaded = append(downloaded, asin)
-				downloadedSet[asin] = struct{}{}
 				if err := a.Store.Save(downloaded); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
+					jobFailed = true
+				}
+				if jobFailed {
+					failed++
 				}
 				mu.Unlock()
 			}
@@ -171,16 +184,27 @@ func (a *App) Download(ctx context.Context) error {
 	close(jobCh)
 	wg.Wait()
 
+	if failed > 0 {
+		return fmt.Errorf("failed to download or record %d book(s)", failed)
+	}
 	return nil
 }
 
 func (a *App) writePartsManifestIfSplit(ctx context.Context, outputDir, asin, title string, hasSeries bool, seriesSeq interface{}) error {
+	if !validASIN(asin) {
+		return fmt.Errorf("invalid ASIN %q", asin)
+	}
 	parts, err := a.Audible.GetAudioParts(ctx, asin)
 	if err != nil {
 		return err
 	}
 	if len(parts) == 0 {
 		return nil
+	}
+	for _, partASIN := range parts {
+		if !validASIN(partASIN) {
+			return fmt.Errorf("invalid audio part ASIN %q", partASIN)
+		}
 	}
 
 	prefix := ""
@@ -209,6 +233,14 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 	}
 
 	sanitizedTitle := sanitizeFileName(title)
+	type renamePlan struct {
+		oldName string
+		newName string
+		oldPath string
+		newPath string
+	}
+	plans := make([]renamePlan, 0, len(files))
+	targets := make(map[string]struct{}, len(files))
 
 	for _, file := range files {
 		name := file.Name()
@@ -231,31 +263,24 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 		}
 
 		newName := stripAudibleQualitySuffix(prefix+sanitizedTitle+suffix) + ext
-
-		newPath := filepath.Join(outputDir, newName)
-		if fileExistsFS(a.FS, newPath) && name != newName {
-			counter := 1
-			for {
-				altName := prefix + sanitizedTitle + fmt.Sprintf("_%d", counter) + ext
-				altPath := filepath.Join(outputDir, altName)
-				if !fileExistsFS(a.FS, altPath) {
-					newName = altName
-					newPath = altPath
-					break
-				}
-				counter++
-				if counter > 100 {
-					return fmt.Errorf("could not find unique name for %s", name)
-				}
-			}
-		}
-
-		oldPath := filepath.Join(outputDir, name)
 		if name == newName {
 			continue
 		}
-		if err := a.FS.Rename(oldPath, newPath); err != nil {
-			return fmt.Errorf("failed to rename %s to %s: %w", name, newName, err)
+		oldPath := filepath.Join(outputDir, name)
+		newPath := filepath.Join(outputDir, newName)
+		if fileExistsFS(a.FS, newPath) {
+			return fmt.Errorf("cannot rename %s: target %s already exists", name, newName)
+		}
+		if _, exists := targets[newPath]; exists {
+			return fmt.Errorf("cannot rename %s: multiple files target %s", name, newName)
+		}
+		targets[newPath] = struct{}{}
+		plans = append(plans, renamePlan{oldName: name, newName: newName, oldPath: oldPath, newPath: newPath})
+	}
+
+	for _, plan := range plans {
+		if err := a.FS.Rename(plan.oldPath, plan.newPath); err != nil {
+			return fmt.Errorf("failed to rename %s to %s: %w", plan.oldName, plan.newName, err)
 		}
 	}
 
@@ -280,6 +305,8 @@ func (a *App) Convert(ctx context.Context) error {
 		return fmt.Errorf("failed to list .aaxc files: %w", err)
 	}
 
+	aaxFiles = pendingConversionFiles(a.FS, aaxFiles)
+	aaxcFiles = pendingConversionFiles(a.FS, aaxcFiles)
 	if len(aaxFiles) == 0 && len(aaxcFiles) == 0 {
 		fmt.Println("No .aax or .aaxc files found to convert")
 	}
@@ -297,6 +324,7 @@ func (a *App) Convert(ctx context.Context) error {
 		outputPath := conversionOutputPath(inputPath)
 		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
 		if err := a.Converter.ConvertAAX(ctx, inputPath, outputPath, activationBytes); err != nil {
+			_ = a.FS.Remove(outputPath)
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
 		}
@@ -315,6 +343,7 @@ func (a *App) Convert(ctx context.Context) error {
 
 		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
 		if err := a.Converter.ConvertAAXC(ctx, inputPath, outputPath, key, iv); err != nil {
+			_ = a.FS.Remove(outputPath)
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
 		}
@@ -353,6 +382,14 @@ func (a *App) mergeParts(ctx context.Context) error {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			return fmt.Errorf("failed to parse part manifest %s: %w", manifestPath, err)
 		}
+		if !validASIN(manifest.ASIN) {
+			return fmt.Errorf("part manifest %s contains invalid ASIN %q", manifestPath, manifest.ASIN)
+		}
+		for _, partASIN := range manifest.Parts {
+			if !validASIN(partASIN) {
+				return fmt.Errorf("part manifest %s contains invalid part ASIN %q", manifestPath, partASIN)
+			}
+		}
 
 		dir := filepath.Dir(manifestPath)
 		partPaths := make([]string, 0, len(manifest.Parts))
@@ -370,6 +407,9 @@ func (a *App) mergeParts(ctx context.Context) error {
 		}
 
 		outputPath := filepath.Join(dir, manifest.OutputBase+".m4b")
+		if fileExistsFS(a.FS, outputPath) {
+			return fmt.Errorf("refusing to overwrite existing merged book %s", outputPath)
+		}
 		listPath := filepath.Join(dir, manifest.ASIN+"-concat.txt")
 
 		var listBuilder strings.Builder
@@ -378,7 +418,7 @@ func (a *App) mergeParts(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("failed to resolve absolute path for %s: %w", partPath, err)
 			}
-			fmt.Fprintf(&listBuilder, "file '%s'\n", absPartPath)
+			fmt.Fprintf(&listBuilder, "file '%s'\n", escapeFFconcatPath(absPartPath))
 		}
 		if err := a.FS.WriteFile(listPath, []byte(listBuilder.String()), 0o644); err != nil {
 			return fmt.Errorf("failed to write concat list for %s: %w", manifest.ASIN, err)
@@ -405,10 +445,24 @@ func (a *App) mergeParts(ctx context.Context) error {
 	return nil
 }
 
+func escapeFFconcatPath(path string) string {
+	return strings.ReplaceAll(path, "'", "'\\''")
+}
+
 func conversionOutputPath(inputPath string) string {
 	dir := filepath.Dir(inputPath)
 	stem := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 	return filepath.Join(dir, stripAudibleQualitySuffix(stem)+".m4b")
+}
+
+func pendingConversionFiles(fs FileSystem, files []string) []string {
+	pending := files[:0]
+	for _, inputPath := range files {
+		if !fileExistsFS(fs, conversionOutputPath(inputPath)) {
+			pending = append(pending, inputPath)
+		}
+	}
+	return pending
 }
 
 func stripAudibleQualitySuffix(stem string) string {
@@ -453,13 +507,8 @@ func (a *App) Clean(ctx context.Context) error {
 		if d.IsDir() {
 			return nil
 		}
-		name := d.Name()
-		if strings.HasSuffix(name, ".aaxc") ||
-			strings.HasSuffix(name, ".aax") ||
-			strings.HasSuffix(name, ".jpg") ||
-			strings.HasSuffix(name, ".json") ||
-			strings.HasSuffix(name, ".voucher") ||
-			strings.HasSuffix(name, ".pdf") {
+		switch strings.ToLower(filepath.Ext(d.Name())) {
+		case ".aaxc", ".aax", ".jpg", ".json", ".voucher", ".pdf":
 			if err := a.FS.Remove(path); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", path, err)
 			}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -12,7 +11,7 @@ import (
 
 // === Existing domain/adapter tests ===
 
-func TestParseLibraryJSON(t *testing.T) {
+func TestParseLibraryItemsJSON(t *testing.T) {
 	tempDir := t.TempDir()
 	path := filepath.Join(tempDir, "library.json")
 	contents := `[
@@ -27,14 +26,25 @@ func TestParseLibraryJSON(t *testing.T) {
 		t.Fatalf("write temp library: %v", err)
 	}
 
-	asins, err := parseLibraryJSON(&osFS{}, path)
+	items, err := parseLibraryItemsJSON(&osFS{}, path)
 	if err != nil {
-		t.Fatalf("parseLibraryJSON returned error: %v", err)
+		t.Fatalf("parseLibraryItemsJSON returned error: %v", err)
 	}
 
-	want := []string{"B001", "B002"}
-	if !reflect.DeepEqual(asins, want) {
-		t.Fatalf("unexpected asins: got %v want %v", asins, want)
+	want := []Book{{ASIN: "B001"}, {ASIN: "B002"}}
+	if !reflect.DeepEqual(items, want) {
+		t.Fatalf("unexpected items: got %v want %v", items, want)
+	}
+}
+
+func TestParseLibraryItemsJSONRejectsUnsafeASIN(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.json")
+	if err := os.WriteFile(path, []byte(`[{"asin":"../B001"}]`), 0o644); err != nil {
+		t.Fatalf("write library: %v", err)
+	}
+
+	if _, err := parseLibraryItemsJSON(&osFS{}, path); err == nil {
+		t.Fatal("expected unsafe ASIN to be rejected")
 	}
 }
 
@@ -157,6 +167,9 @@ func TestSanitizeFileName(t *testing.T) {
 		{"A/B Testing", "A-B Testing"},
 		{"File*Name?", "FileName"},
 		{"  Multiple   Spaces  ", "Multiple Spaces"},
+		{"..", "_"},
+		{".", "_"},
+		{"", "_"},
 	}
 
 	for _, tt := range tests {
@@ -294,6 +307,25 @@ func TestRenameDownloadedFilesWithSeries(t *testing.T) {
 	}
 }
 
+func TestRenameDownloadedFilesLeavesSidecarsTogetherOnCollision(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"B004.aaxc", "B004.voucher", "Existing Book.aaxc"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("create file %s: %v", name, err)
+		}
+	}
+
+	app := &App{FS: &osFS{}}
+	if err := app.renameDownloadedFiles(dir, "B004", "Existing Book", false, nil); err == nil {
+		t.Fatal("expected target collision")
+	}
+	for _, name := range []string{"B004.aaxc", "B004.voucher"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected source %s to remain: %v", name, err)
+		}
+	}
+}
+
 // === New CLI tests ===
 
 func TestRun_HelpCommand(t *testing.T) {
@@ -323,29 +355,13 @@ func TestRun_NoCommand(t *testing.T) {
 }
 
 func TestRun_StatusTableFlag(t *testing.T) {
-	err := run(context.Background(), []string{"status", "-table"})
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			t.Fatal("did not expect flag help error")
-		}
-		// The error should NOT be about undefined flags
-		if contains(err.Error(), "flag provided but not defined") {
-			t.Fatalf("unexpected flag error: %v", err)
-		}
+	cmd := buildCommands()["status"]
+	fs := flag.NewFlagSet(cmd.Name, flag.ContinueOnError)
+	cmd.Setup(fs)
+	if err := fs.Parse([]string{"-table"}); err != nil {
+		t.Fatalf("parse status flags: %v", err)
 	}
-	// If audible-cli is configured, this may succeed. The key assertion is
-	// that it does not fail with a flag-parsing error.
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsInternal(s, substr))
-}
-
-func containsInternal(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	if fs.Lookup("table").Value.String() != "true" {
+		t.Fatal("expected -table to be true")
 	}
-	return false
 }

@@ -149,6 +149,9 @@ func (a *audibleCLI) GetAudioParts(ctx context.Context, asin string) ([]string, 
 	parts := make([]string, 0, len(resp.Items))
 	for _, item := range resp.Items {
 		if asin := strings.TrimSpace(item.ASIN); asin != "" {
+			if !validASIN(asin) {
+				return nil, fmt.Errorf("audio parts response contains invalid ASIN %q", asin)
+			}
 			parts = append(parts, asin)
 		}
 	}
@@ -254,11 +257,10 @@ func (o *osFS) ReadFile(name string) ([]byte, error)         { return os.ReadFil
 func (o *osFS) WriteFile(name string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(name, data, perm)
 }
-func (o *osFS) Rename(oldpath, newpath string) error             { return os.Rename(oldpath, newpath) }
-func (o *osFS) Remove(name string) error                         { return os.Remove(name) }
-func (o *osFS) Stat(name string) (os.FileInfo, error)            { return os.Stat(name) }
-func (o *osFS) WalkDir(root string, fn fs.WalkDirFunc) error     { return filepath.WalkDir(root, fn) }
-func (o *osFS) CreateTemp(dir, pattern string) (*os.File, error) { return os.CreateTemp(dir, pattern) }
+func (o *osFS) Rename(oldpath, newpath string) error         { return os.Rename(oldpath, newpath) }
+func (o *osFS) Remove(name string) error                     { return os.Remove(name) }
+func (o *osFS) Stat(name string) (os.FileInfo, error)        { return os.Stat(name) }
+func (o *osFS) WalkDir(root string, fn fs.WalkDirFunc) error { return filepath.WalkDir(root, fn) }
 
 // jsonASINStore persists downloaded ASINs to a JSON file.
 type jsonASINStore struct {

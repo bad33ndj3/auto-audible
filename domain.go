@@ -44,7 +44,11 @@ func partsManifestPath(dir, asin string) string {
 }
 
 var activationBytesPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}$`)
-var whitespacePattern = regexp.MustCompile(`\s+`)
+var asinPattern = regexp.MustCompile(`^[A-Za-z0-9]+$`)
+
+func validASIN(asin string) bool {
+	return asinPattern.MatchString(asin)
+}
 
 func sanitizeFileName(name string) string {
 	replacer := strings.NewReplacer(
@@ -59,8 +63,10 @@ func sanitizeFileName(name string) string {
 		"|", "-",
 	)
 	name = replacer.Replace(name)
-	name = whitespacePattern.ReplaceAllString(name, " ")
-	name = strings.TrimSpace(name)
+	name = strings.Join(strings.Fields(name), " ")
+	if name == "" || name == "." || name == ".." {
+		return "_"
+	}
 	return name
 }
 
@@ -152,20 +158,6 @@ func printStatusTable(rows [][3]string) {
 	}
 }
 
-func parseLibraryJSON(fs FileSystem, filename string) ([]string, error) {
-	items, err := parseLibraryItemsJSON(fs, filename)
-	if err != nil {
-		return nil, err
-	}
-
-	asins := make([]string, 0, len(items))
-	for _, item := range items {
-		asins = append(asins, item.ASIN)
-	}
-
-	return asins, nil
-}
-
 func parseLibraryItemsJSON(fs FileSystem, filename string) ([]Book, error) {
 	data, err := fs.ReadFile(filename)
 	if err != nil {
@@ -183,6 +175,9 @@ func parseLibraryItemsJSON(fs FileSystem, filename string) ([]Book, error) {
 		asin := strings.TrimSpace(item.ASIN)
 		if asin == "" {
 			continue
+		}
+		if !validASIN(asin) {
+			return nil, fmt.Errorf("invalid ASIN %q", asin)
 		}
 		if _, ok := seen[asin]; ok {
 			continue
