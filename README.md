@@ -189,3 +189,7 @@ go build ./...
 ```
 
 GitHub Actions runs the race-enabled tests and `go vet` for pushes and pull requests. Dependabot checks Go modules and GitHub Actions weekly. Devbox is not supported by Dependabot; refresh `devbox.lock` manually with `devbox update`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
