@@ -609,6 +609,7 @@ func TestClean_RemovesOnlyIntermediateFiles(t *testing.T) {
 	fs.files["media/book.json"] = []byte("x")
 	fs.files["media/book.voucher"] = []byte("x")
 	fs.files["media/book.pdf"] = []byte("x")
+	fs.files["media/LOUD.AAX"] = []byte("x")
 	fs.files["media/book.m4b"] = []byte("x")
 	fs.files["media/book.txt"] = []byte("x")
 
@@ -640,6 +641,9 @@ func TestClean_RemovesOnlyIntermediateFiles(t *testing.T) {
 	}
 	if _, ok := fs.files["media/book.pdf"]; ok {
 		t.Fatal("expected .pdf to be removed")
+	}
+	if _, ok := fs.files["media/LOUD.AAX"]; ok {
+		t.Fatal("expected uppercase .AAX to be removed")
 	}
 }
 

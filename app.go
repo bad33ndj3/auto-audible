@@ -479,13 +479,8 @@ func (a *App) Clean(ctx context.Context) error {
 		if d.IsDir() {
 			return nil
 		}
-		name := d.Name()
-		if strings.HasSuffix(name, ".aaxc") ||
-			strings.HasSuffix(name, ".aax") ||
-			strings.HasSuffix(name, ".jpg") ||
-			strings.HasSuffix(name, ".json") ||
-			strings.HasSuffix(name, ".voucher") ||
-			strings.HasSuffix(name, ".pdf") {
+		switch strings.ToLower(filepath.Ext(d.Name())) {
+		case ".aaxc", ".aax", ".jpg", ".json", ".voucher", ".pdf":
 			if err := a.FS.Remove(path); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", path, err)
 			}
