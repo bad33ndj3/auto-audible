@@ -194,13 +194,17 @@ func (d *fakeDirEntry) Info() (os.FileInfo, error) {
 
 // fakeStore is a test double for ASINStore.
 type fakeStore struct {
-	asins []string
+	asins   []string
+	saveErr error
 }
 
 func (f *fakeStore) Load() ([]string, error) {
 	return f.asins, nil
 }
 func (f *fakeStore) Save(asins []string) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	f.asins = asins
 	return nil
 }
@@ -362,7 +366,7 @@ func TestDownload_NoManifestForSinglePartBook(t *testing.T) {
 	}
 }
 
-func TestDownload_HandlesDownloadErrorGracefully(t *testing.T) {
+func TestDownload_ReturnsDownloadErrors(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true
 	fs.entries["media"] = []os.DirEntry{}
@@ -383,12 +387,30 @@ func TestDownload_HandlesDownloadErrorGracefully(t *testing.T) {
 		DownloadWorkers: 1,
 	}
 
-	if err := app.Download(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := app.Download(context.Background()); err == nil {
+		t.Fatal("expected download failures to be returned")
 	}
 
 	if len(store.asins) != 0 {
 		t.Fatalf("expected no ASINs saved after all failures, got %v", store.asins)
+	}
+}
+
+func TestDownload_ReturnsStoreErrors(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+
+	app := &App{
+		Audible:         &fakeAudible{library: []Book{{ASIN: "B001", Title: "Book"}}},
+		FS:              fs,
+		Store:           &fakeStore{saveErr: errors.New("disk full")},
+		MediaDir:        "media",
+		DownloadWorkers: 1,
+	}
+
+	if err := app.Download(context.Background()); err == nil {
+		t.Fatal("expected store failures to be returned")
 	}
 }
 

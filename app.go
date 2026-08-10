@@ -131,6 +131,7 @@ func (a *App) Download(ctx context.Context) error {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	jobCh := make(chan job)
+	failed := 0
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -143,6 +144,9 @@ func (a *App) Download(ctx context.Context) error {
 				fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
 				if err := a.Audible.DownloadBook(ctx, asin, j.outputDir); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
+					mu.Lock()
+					failed++
+					mu.Unlock()
 					continue
 				}
 
@@ -159,6 +163,7 @@ func (a *App) Download(ctx context.Context) error {
 				downloadedSet[asin] = struct{}{}
 				if err := a.Store.Save(downloaded); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
+					failed++
 				}
 				mu.Unlock()
 			}
@@ -171,6 +176,9 @@ func (a *App) Download(ctx context.Context) error {
 	close(jobCh)
 	wg.Wait()
 
+	if failed > 0 {
+		return fmt.Errorf("failed to download or record %d book(s)", failed)
+	}
 	return nil
 }
 
