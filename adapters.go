@@ -149,6 +149,9 @@ func (a *audibleCLI) GetAudioParts(ctx context.Context, asin string) ([]string, 
 	parts := make([]string, 0, len(resp.Items))
 	for _, item := range resp.Items {
 		if asin := strings.TrimSpace(item.ASIN); asin != "" {
+			if !validASIN(asin) {
+				return nil, fmt.Errorf("audio parts response contains invalid ASIN %q", asin)
+			}
 			parts = append(parts, asin)
 		}
 	}

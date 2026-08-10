@@ -44,6 +44,11 @@ func partsManifestPath(dir, asin string) string {
 }
 
 var activationBytesPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}$`)
+var asinPattern = regexp.MustCompile(`^[A-Za-z0-9]+$`)
+
+func validASIN(asin string) bool {
+	return asinPattern.MatchString(asin)
+}
 
 func sanitizeFileName(name string) string {
 	replacer := strings.NewReplacer(
@@ -170,6 +175,9 @@ func parseLibraryItemsJSON(fs FileSystem, filename string) ([]Book, error) {
 		asin := strings.TrimSpace(item.ASIN)
 		if asin == "" {
 			continue
+		}
+		if !validASIN(asin) {
+			return nil, fmt.Errorf("invalid ASIN %q", asin)
 		}
 		if _, ok := seen[asin]; ok {
 			continue

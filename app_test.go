@@ -600,6 +600,30 @@ func TestConvert_SkipsMergeWhenPartsIncomplete(t *testing.T) {
 	}
 }
 
+func TestConvert_RejectsUnsafePartASIN(t *testing.T) {
+	fs := newFakeFS()
+	manifestData, err := json.Marshal(partsManifest{
+		ASIN:       "B001",
+		Parts:      []string{"../outside"},
+		OutputBase: "Book",
+	})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	fs.files["media/B001-parts.json"] = manifestData
+
+	app := &App{
+		Audible:   &fakeAudible{},
+		Converter: &fakeConverter{},
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+	if err := app.Convert(context.Background()); err == nil {
+		t.Fatal("expected unsafe part ASIN to be rejected")
+	}
+}
+
 func TestEscapeFFconcatPath(t *testing.T) {
 	got := escapeFFconcatPath("/media/Reader's Series/part.m4b")
 	want := "/media/Reader'\\''s Series/part.m4b"

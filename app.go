@@ -191,12 +191,20 @@ func (a *App) Download(ctx context.Context) error {
 }
 
 func (a *App) writePartsManifestIfSplit(ctx context.Context, outputDir, asin, title string, hasSeries bool, seriesSeq interface{}) error {
+	if !validASIN(asin) {
+		return fmt.Errorf("invalid ASIN %q", asin)
+	}
 	parts, err := a.Audible.GetAudioParts(ctx, asin)
 	if err != nil {
 		return err
 	}
 	if len(parts) == 0 {
 		return nil
+	}
+	for _, partASIN := range parts {
+		if !validASIN(partASIN) {
+			return fmt.Errorf("invalid audio part ASIN %q", partASIN)
+		}
 	}
 
 	prefix := ""
@@ -373,6 +381,14 @@ func (a *App) mergeParts(ctx context.Context) error {
 		var manifest partsManifest
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			return fmt.Errorf("failed to parse part manifest %s: %w", manifestPath, err)
+		}
+		if !validASIN(manifest.ASIN) {
+			return fmt.Errorf("part manifest %s contains invalid ASIN %q", manifestPath, manifest.ASIN)
+		}
+		for _, partASIN := range manifest.Parts {
+			if !validASIN(partASIN) {
+				return fmt.Errorf("part manifest %s contains invalid part ASIN %q", manifestPath, partASIN)
+			}
 		}
 
 		dir := filepath.Dir(manifestPath)

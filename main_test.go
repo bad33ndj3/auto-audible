@@ -37,6 +37,17 @@ func TestParseLibraryItemsJSON(t *testing.T) {
 	}
 }
 
+func TestParseLibraryItemsJSONRejectsUnsafeASIN(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.json")
+	if err := os.WriteFile(path, []byte(`[{"asin":"../B001"}]`), 0o644); err != nil {
+		t.Fatalf("write library: %v", err)
+	}
+
+	if _, err := parseLibraryItemsJSON(&osFS{}, path); err == nil {
+		t.Fatal("expected unsafe ASIN to be rejected")
+	}
+}
+
 func TestExtractActivationBytes(t *testing.T) {
 	output := "Fetching activation bytes from Audible server\nSave activation bytes to file\na196c606\n"
 
