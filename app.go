@@ -153,18 +153,24 @@ func (a *App) Download(ctx context.Context) error {
 					continue
 				}
 
+				jobFailed := false
 				if err := a.renameDownloadedFiles(j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
+					jobFailed = true
 				}
 
 				if err := a.writePartsManifestIfSplit(ctx, j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to record audio parts for ASIN %s: %v\n", asin, err)
+					jobFailed = true
 				}
 
 				mu.Lock()
 				downloaded = append(downloaded, asin)
 				if err := a.Store.Save(downloaded); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
+					jobFailed = true
+				}
+				if jobFailed {
 					failed++
 				}
 				mu.Unlock()

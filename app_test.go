@@ -265,6 +265,7 @@ func TestDownload_CreatesSeriesDirectory(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true
 	fs.entries["media"] = []os.DirEntry{}
+	fs.entries["media/My Series"] = []os.DirEntry{}
 
 	store := &fakeStore{}
 	audible := &fakeAudible{
@@ -412,6 +413,27 @@ func TestDownload_ReturnsStoreErrors(t *testing.T) {
 
 	if err := app.Download(context.Background()); err == nil {
 		t.Fatal("expected store failures to be returned")
+	}
+}
+
+func TestDownload_ReturnsPostProcessingErrors(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+
+	app := &App{
+		Audible: &fakeAudible{
+			library:       []Book{{ASIN: "B001", Title: "Book"}},
+			audioPartsErr: errors.New("parts lookup failed"),
+		},
+		FS:              fs,
+		Store:           &fakeStore{},
+		MediaDir:        "media",
+		DownloadWorkers: 1,
+	}
+
+	if err := app.Download(context.Background()); err == nil {
+		t.Fatal("expected post-processing failures to be returned")
 	}
 }
 
