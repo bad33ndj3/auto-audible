@@ -623,13 +623,13 @@ func TestConvert_CommitsOutputAtomically(t *testing.T) {
 	if err := app.Convert(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := converter.aaxCalls[0].output; got != "media/book.m4b.partial" {
-		t.Fatalf("converter wrote %q directly; want partial output", got)
+	if got := converter.aaxCalls[0].output; got != "media/book.partial.m4b" {
+		t.Fatalf("converter output %q must retain the .m4b extension", got)
 	}
 	if _, ok := fs.files["media/book.m4b"]; !ok {
 		t.Fatal("completed conversion was not committed")
 	}
-	if _, ok := fs.files["media/book.m4b.partial"]; ok {
+	if _, ok := fs.files["media/book.partial.m4b"]; ok {
 		t.Fatal("partial output remains after commit")
 	}
 }
@@ -690,7 +690,7 @@ func TestConvert_MergesMultiPartBook(t *testing.T) {
 	if len(converter.concatCalls) != 1 {
 		t.Fatalf("expected 1 concat call, got %d", len(converter.concatCalls))
 	}
-	if converter.concatCalls[0].output != "media/This Inevitable Ruin.m4b.partial" {
+	if converter.concatCalls[0].output != "media/This Inevitable Ruin.partial.m4b" {
 		t.Fatalf("unexpected concat output: %s", converter.concatCalls[0].output)
 	}
 	if _, ok := fs.files["media/This Inevitable Ruin.m4b"]; !ok {

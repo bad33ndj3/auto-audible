@@ -365,7 +365,7 @@ func (a *App) Convert(ctx context.Context) error {
 }
 
 func (a *App) convertAndCommit(outputPath string, convert func(string) error) error {
-	partialPath := outputPath + ".partial"
+	partialPath := temporaryOutputPath(outputPath)
 	_ = a.FS.Remove(partialPath)
 	committed := false
 	defer func() {
@@ -388,6 +388,11 @@ func (a *App) convertAndCommit(outputPath string, convert func(string) error) er
 	}
 	committed = true
 	return nil
+}
+
+func temporaryOutputPath(outputPath string) string {
+	ext := filepath.Ext(outputPath)
+	return strings.TrimSuffix(outputPath, ext) + ".partial" + ext
 }
 
 // mergeParts finds part manifests written during Download and, for any
