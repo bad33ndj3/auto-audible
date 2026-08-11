@@ -391,6 +391,30 @@ func TestRenameDownloadedFilesLeavesSidecarsTogetherOnCollision(t *testing.T) {
 	}
 }
 
+func TestRenameDownloadedFilesDiscardsIdenticalSidecarRetry(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"B005-chapters.json", "Retry Book-chapters.json", "B005_(500).jpg", "Retry Book_(500).jpg"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("same sidecar"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	app := &App{FS: &osFS{}}
+	if err := app.renameDownloadedFiles(dir, "B005", "Retry Book", false, ""); err != nil {
+		t.Fatalf("identical sidecar retry failed: %v", err)
+	}
+	for _, name := range []string{"Retry Book-chapters.json", "Retry Book_(500).jpg"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected retained sidecar %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"B005-chapters.json", "B005_(500).jpg"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected redundant sidecar %s to be removed, err=%v", name, err)
+		}
+	}
+}
+
 // === New CLI tests ===
 
 func TestRun_HelpCommand(t *testing.T) {

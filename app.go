@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -242,6 +243,7 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 		newPath string
 	}
 	plans := make([]renamePlan, 0, len(files))
+	redundantPaths := make([]string, 0, len(files))
 	targets := make(map[string]struct{}, len(files))
 
 	for _, file := range files {
@@ -271,6 +273,10 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 		oldPath := filepath.Join(outputDir, name)
 		newPath := filepath.Join(outputDir, newName)
 		if fileExistsFS(a.FS, newPath) {
+			if identicalRetrySidecar(a.FS, oldPath, newPath) {
+				redundantPaths = append(redundantPaths, oldPath)
+				continue
+			}
 			return fmt.Errorf("cannot rename %s: target %s already exists", name, newName)
 		}
 		if _, exists := targets[newPath]; exists {
@@ -285,8 +291,26 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 			return fmt.Errorf("failed to rename %s to %s: %w", plan.oldName, plan.newName, err)
 		}
 	}
+	for _, path := range redundantPaths {
+		if err := a.FS.Remove(path); err != nil {
+			return fmt.Errorf("failed to remove redundant sidecar %s: %w", path, err)
+		}
+	}
 
 	return nil
+}
+
+func identicalRetrySidecar(fs FileSystem, source, target string) bool {
+	name := strings.ToLower(filepath.Base(source))
+	if !strings.HasSuffix(name, "-chapters.json") && !strings.HasSuffix(name, ".jpg") && !strings.HasSuffix(name, ".jpeg") && !strings.HasSuffix(name, ".voucher") {
+		return false
+	}
+	sourceData, err := fs.ReadFile(source)
+	if err != nil {
+		return false
+	}
+	targetData, err := fs.ReadFile(target)
+	return err == nil && bytes.Equal(sourceData, targetData)
 }
 
 func (a *App) Convert(ctx context.Context) error {
