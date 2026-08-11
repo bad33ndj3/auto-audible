@@ -31,38 +31,40 @@ The wrapper will also detect missing setup and ask to run it when you start the 
 ## Commands
 
 ```bash
-go run . download [--profile audible] [--password secret] [--media-dir media] [--workers 1]
+go run . sync     [--profile audible] [--password secret] [--media-dir media]
+go run . plan     [--profile audible] [--password secret] [--media-dir media]
+go run . download [--profile audible] [--password secret] [--media-dir media]
 go run . convert  [--profile audible] [--password secret] [--media-dir media]
 go run . clean    [--media-dir media]
 go run . ready    [--media-dir media]
 go run . status   [--profile audible] [--password secret] [--media-dir media]
 go run . status   --table [--profile audible] [--password secret] [--media-dir media]
-go run . all      [--profile audible] [--password secret] [--media-dir media]
 ```
 
 Command summary:
 
-- `download`: exports the Audible library and downloads books whose ASIN is not yet present in `downloaded_asins.json`
+- `sync`: the normal command: download, convert, safely remove completed conversion inputs, and print what is ready
+- `plan`: lists the exact titles the next `sync` will skip and download; it never writes media
+- `all`: deprecated alias for `sync`, retained for existing scripts
+- `download`: exports the Audible library and downloads missing books; tracked books are retried if their media vanished
 - `convert`: converts `.aax` and `.aaxc` files in the media directory to `.m4b`
-- `clean`: removes intermediate `.aax`, `.aaxc`, `.jpg`, `.json`, `.voucher`, and `.pdf` files from the media directory
+- `clean`: removes only `.aax`, `.aaxc`, `.voucher`, and `-chapters.json` files that already have a committed `.m4b`; it keeps covers, PDFs, unrelated JSON, and anything still needed for recovery
 - `ready`: lists ready-to-listen `.m4b` titles and what is still pending (`.aax` / `.aaxc`)
 - `status`: checks current library/media status (total library, tracked downloads, remaining, ready, pending conversions)
-- `all`: runs `download` and `convert`
-
-Downloads run one at a time by default to avoid stressing Audible connections. If your connection and account tolerate parallel downloads, increase `--workers` explicitly.
+Downloads are deliberately serial. Audible is the bottleneck, and a single ordered flow keeps the media ledger safe and predictable.
 
 ## Auth behavior
 
 Encrypted auth file:
 
 ```bash
-go run . all --password "your-auth-password"
+go run . sync --password "your-auth-password"
 ```
 
 Unencrypted auth file:
 
 ```bash
-go run . all
+go run . sync
 ```
 
 Profile-specific usage:
@@ -75,7 +77,7 @@ go run . download --profile audible
 
 1. `auto-audible` checks whether `audible-cli` is available and configured.
 2. It exports your Audible library as JSON.
-3. It downloads only ASINs that are not already listed in `downloaded_asins.json`.
+3. It tracks completed downloads in `<media-dir>/.auto-audible.json` (and imports the old `downloaded_asins.json` once for the default `media/` directory).
 4. Books that belong to a series are placed in a subfolder named after the series.
 5. Series books are renamed with a `## - ` prefix (e.g. `15 - Armor World.m4b`).
 6. It asks `audible-cli` for activation bytes (for `.aax` conversion).
@@ -108,14 +110,17 @@ For `.aaxc`, conversion requires the matching `.voucher` file (same basename) be
 
 ```bash
 task
+task sync
+task plan
 task download
 task convert
 task clean
 task ready
 task status
-task all
+task docker-sync
 task docker-build
-task docker-all
+task all          # deprecated alias for sync
+task docker-all   # deprecated alias for docker-sync
 ```
 
 `status --table` lists every library title with one of these states:
@@ -147,7 +152,7 @@ docker run --rm -it \
   -v "$HOME/.audible:/root/.audible" \
   -v "$PWD:/work" \
   -w /work \
-  auto-audible all
+  auto-audible sync
 ```
 
 Use a specific profile:
@@ -167,7 +172,7 @@ docker run --rm -it \
   -v "$HOME/.audible:/root/.audible" \
   -v "$PWD:/work" \
   -w /work \
-  auto-audible all --password "your-auth-password"
+  auto-audible sync --password "your-auth-password"
 ```
 
 If you prefer a different config directory, mount it and set `AUDIBLE_CONFIG_DIR`.

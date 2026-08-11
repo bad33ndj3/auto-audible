@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,20 +10,18 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 )
 
 // App orchestrates the audible download and conversion workflow.
 type App struct {
-	Audible         AudibleService
-	Converter       MediaConverter
-	FS              FileSystem
-	Store           ASINStore
-	Prompter        Prompter
-	MediaDir        string
-	DownloadWorkers int
-	lookPath        func(string) (string, error)
-	interactive     func() bool
+	Audible     AudibleService
+	Converter   MediaConverter
+	FS          FileSystem
+	Store       ASINStore
+	Prompter    Prompter
+	MediaDir    string
+	lookPath    func(string) (string, error)
+	interactive func() bool
 }
 
 func (a *App) EnsureAudibleConfigured(ctx context.Context) error {
@@ -78,25 +77,15 @@ func (a *App) Download(ctx context.Context) error {
 		return fmt.Errorf("failed to create media directory: %w", err)
 	}
 
-	items, err := a.Audible.ExportLibrary(ctx)
+	plan, err := a.DownloadPlan(ctx)
 	if err != nil {
 		return err
 	}
-
-	if len(items) == 0 {
+	if len(plan.Present)+len(plan.Download) == 0 {
 		fmt.Println("No library items found in Audible export")
 		return nil
 	}
-
-	downloaded, err := a.Store.Load()
-	if err != nil {
-		return fmt.Errorf("failed to load downloaded ASINs: %w", err)
-	}
-
-	downloadedSet := make(map[string]struct{}, len(downloaded))
-	for _, asin := range downloaded {
-		downloadedSet[asin] = struct{}{}
-	}
+	downloaded := plan.downloaded
 
 	type job struct {
 		item      Book
@@ -105,13 +94,7 @@ func (a *App) Download(ctx context.Context) error {
 	}
 
 	var jobs []job
-	for _, item := range items {
-		asin := item.ASIN
-		if _, ok := downloadedSet[asin]; ok {
-			fmt.Printf("ASIN %s already downloaded, skipping.\n", asin)
-			continue
-		}
-
+	for _, item := range plan.Download {
 		outputDir := a.MediaDir
 		seriesTitle := strings.TrimSpace(item.SeriesTitle)
 		hasSeries := seriesTitle != ""
@@ -126,63 +109,33 @@ func (a *App) Download(ctx context.Context) error {
 		jobs = append(jobs, job{item: item, outputDir: outputDir, hasSeries: hasSeries})
 	}
 
-	workers := a.DownloadWorkers
-	if workers <= 0 {
-		workers = defaultDownloadWorkers
-	}
-
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	jobCh := make(chan job)
 	failed := 0
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range jobCh {
-				item := j.item
-				asin := item.ASIN
-
-				fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
-				if err := a.Audible.DownloadBook(ctx, asin, j.outputDir); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
-					mu.Lock()
-					failed++
-					mu.Unlock()
-					continue
-				}
-
-				jobFailed := false
-				if err := a.renameDownloadedFiles(j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
-					jobFailed = true
-				}
-
-				if err := a.writePartsManifestIfSplit(ctx, j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to record audio parts for ASIN %s: %v\n", asin, err)
-					jobFailed = true
-				}
-
-				mu.Lock()
-				downloaded = append(downloaded, asin)
-				if err := a.Store.Save(downloaded); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
-					jobFailed = true
-				}
-				if jobFailed {
-					failed++
-				}
-				mu.Unlock()
-			}
-		}()
-	}
-
 	for _, j := range jobs {
-		jobCh <- j
+		item, asin := j.item, j.item.ASIN
+		fmt.Printf("Downloading new book with ASIN: %s (%s)\n", asin, item.Title)
+		if err := a.Audible.DownloadBook(ctx, asin, j.outputDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to download ASIN %s: %v\n", asin, err)
+			failed++
+			continue
+		}
+		if err := a.renameDownloadedFiles(j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to rename files for ASIN %s: %v\n", asin, err)
+			failed++
+			continue
+		}
+		if err := a.writePartsManifestIfSplit(ctx, j.outputDir, asin, item.Title, j.hasSeries, item.SeriesSequence); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to record audio parts for ASIN %s: %v\n", asin, err)
+			failed++
+			continue
+		}
+		next := append(append([]string(nil), downloaded...), asin)
+		if err := a.Store.Save(next); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to save downloaded ASINs: %v\n", err)
+			failed++
+			continue
+		}
+		downloaded = next
 	}
-	close(jobCh)
-	wg.Wait()
 
 	if failed > 0 {
 		return fmt.Errorf("failed to download or record %d book(s)", failed)
@@ -190,7 +143,65 @@ func (a *App) Download(ctx context.Context) error {
 	return nil
 }
 
-func (a *App) writePartsManifestIfSplit(ctx context.Context, outputDir, asin, title string, hasSeries bool, seriesSeq interface{}) error {
+func (a *App) DownloadPlan(ctx context.Context) (DownloadPlan, error) {
+	items, err := a.Audible.ExportLibrary(ctx)
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	downloaded, err := a.Store.Load()
+	if err != nil {
+		return DownloadPlan{}, fmt.Errorf("failed to load downloaded ASINs: %w", err)
+	}
+	tracked := make(map[string]struct{}, len(downloaded))
+	for _, asin := range downloaded {
+		tracked[asin] = struct{}{}
+	}
+	plan := DownloadPlan{downloaded: downloaded}
+	for _, item := range items {
+		if _, ok := tracked[item.ASIN]; ok && a.hasBookMedia(item) {
+			plan.Present = append(plan.Present, item)
+			continue
+		}
+		plan.Download = append(plan.Download, item)
+	}
+	return plan, nil
+}
+
+func (a *App) hasBookMedia(book Book) bool {
+	dir := a.MediaDir
+	prefix := ""
+	if series := strings.TrimSpace(book.SeriesTitle); series != "" {
+		dir = filepath.Join(dir, sanitizeFileName(series))
+		prefix = formatPrefix(book.SeriesSequence)
+	}
+	base := prefix + sanitizeFileName(book.Title)
+	if hasConvertibleMedia(a.FS, dir, base) {
+		return true
+	}
+	data, err := a.FS.ReadFile(partsManifestPath(dir, book.ASIN))
+	if err != nil {
+		return false
+	}
+	var manifest partsManifest
+	if json.Unmarshal(data, &manifest) != nil || len(manifest.Parts) == 0 {
+		return false
+	}
+	for _, asin := range manifest.Parts {
+		if !validASIN(asin) || !hasConvertibleMedia(a.FS, dir, asin) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasConvertibleMedia(fs FileSystem, dir, base string) bool {
+	if fileExistsFS(fs, filepath.Join(dir, base+".m4b")) || fileExistsFS(fs, filepath.Join(dir, base+".aax")) {
+		return true
+	}
+	return fileExistsFS(fs, filepath.Join(dir, base+".aaxc")) && fileExistsFS(fs, filepath.Join(dir, base+".voucher"))
+}
+
+func (a *App) writePartsManifestIfSplit(ctx context.Context, outputDir, asin, title string, hasSeries bool, seriesSeq SeriesSequence) error {
 	if !validASIN(asin) {
 		return fmt.Errorf("invalid ASIN %q", asin)
 	}
@@ -221,7 +232,7 @@ func (a *App) writePartsManifestIfSplit(ctx context.Context, outputDir, asin, ti
 	return a.FS.WriteFile(partsManifestPath(outputDir, asin), data, 0o644)
 }
 
-func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries bool, seriesSeq interface{}) error {
+func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries bool, seriesSeq SeriesSequence) error {
 	files, err := a.FS.ReadDir(outputDir)
 	if err != nil {
 		return err
@@ -240,6 +251,7 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 		newPath string
 	}
 	plans := make([]renamePlan, 0, len(files))
+	redundantPaths := make([]string, 0, len(files))
 	targets := make(map[string]struct{}, len(files))
 
 	for _, file := range files {
@@ -269,6 +281,10 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 		oldPath := filepath.Join(outputDir, name)
 		newPath := filepath.Join(outputDir, newName)
 		if fileExistsFS(a.FS, newPath) {
+			if identicalRetrySidecar(a.FS, oldPath, newPath) {
+				redundantPaths = append(redundantPaths, oldPath)
+				continue
+			}
 			return fmt.Errorf("cannot rename %s: target %s already exists", name, newName)
 		}
 		if _, exists := targets[newPath]; exists {
@@ -283,8 +299,26 @@ func (a *App) renameDownloadedFiles(outputDir, asin, title string, hasSeries boo
 			return fmt.Errorf("failed to rename %s to %s: %w", plan.oldName, plan.newName, err)
 		}
 	}
+	for _, path := range redundantPaths {
+		if err := a.FS.Remove(path); err != nil {
+			return fmt.Errorf("failed to remove redundant sidecar %s: %w", path, err)
+		}
+	}
 
 	return nil
+}
+
+func identicalRetrySidecar(fs FileSystem, source, target string) bool {
+	name := strings.ToLower(filepath.Base(source))
+	if !strings.HasSuffix(name, "-chapters.json") && !strings.HasSuffix(name, ".jpg") && !strings.HasSuffix(name, ".jpeg") && !strings.HasSuffix(name, ".voucher") {
+		return false
+	}
+	sourceData, err := fs.ReadFile(source)
+	if err != nil {
+		return false
+	}
+	targetData, err := fs.ReadFile(target)
+	return err == nil && bytes.Equal(sourceData, targetData)
 }
 
 func (a *App) Convert(ctx context.Context) error {
@@ -323,10 +357,16 @@ func (a *App) Convert(ctx context.Context) error {
 	for _, inputPath := range aaxFiles {
 		outputPath := conversionOutputPath(inputPath)
 		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
-		if err := a.Converter.ConvertAAX(ctx, inputPath, outputPath, activationBytes); err != nil {
-			_ = a.FS.Remove(outputPath)
+		if err := a.convertAndCommit(outputPath, func(partialPath string) error {
+			return a.Converter.ConvertAAX(ctx, inputPath, partialPath, activationBytes)
+		}); err != nil {
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
+			continue
+		}
+		if err := a.FS.Remove(inputPath); err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "Failed to remove converted source %s: %v\n", inputPath, err)
 		}
 	}
 
@@ -342,10 +382,16 @@ func (a *App) Convert(ctx context.Context) error {
 		}
 
 		fmt.Printf("Converting %s -> %s\n", inputPath, outputPath)
-		if err := a.Converter.ConvertAAXC(ctx, inputPath, outputPath, key, iv); err != nil {
-			_ = a.FS.Remove(outputPath)
+		if err := a.convertAndCommit(outputPath, func(partialPath string) error {
+			return a.Converter.ConvertAAXC(ctx, inputPath, partialPath, key, iv)
+		}); err != nil {
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
+			continue
+		}
+		if err := a.FS.Remove(inputPath); err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "Failed to remove converted source %s: %v\n", inputPath, err)
 		}
 	}
 
@@ -358,6 +404,37 @@ func (a *App) Convert(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (a *App) convertAndCommit(outputPath string, convert func(string) error) error {
+	partialPath := temporaryOutputPath(outputPath)
+	_ = a.FS.Remove(partialPath)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = a.FS.Remove(partialPath)
+		}
+	}()
+	if err := convert(partialPath); err != nil {
+		return err
+	}
+	info, err := a.FS.Stat(partialPath)
+	if err != nil {
+		return fmt.Errorf("conversion produced no output: %w", err)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("conversion produced an empty output")
+	}
+	if err := a.FS.Rename(partialPath, outputPath); err != nil {
+		return fmt.Errorf("failed to commit converted output: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func temporaryOutputPath(outputPath string) string {
+	ext := filepath.Ext(outputPath)
+	return strings.TrimSuffix(outputPath, ext) + ".partial" + ext
 }
 
 // mergeParts finds part manifests written during Download and, for any
@@ -385,10 +462,21 @@ func (a *App) mergeParts(ctx context.Context) error {
 		if !validASIN(manifest.ASIN) {
 			return fmt.Errorf("part manifest %s contains invalid ASIN %q", manifestPath, manifest.ASIN)
 		}
+		if manifest.OutputBase == "" || manifest.OutputBase != filepath.Base(manifest.OutputBase) || manifest.OutputBase == "." || manifest.OutputBase == ".." {
+			return fmt.Errorf("part manifest %s contains invalid output name %q", manifestPath, manifest.OutputBase)
+		}
+		if len(manifest.Parts) == 0 {
+			return fmt.Errorf("part manifest %s contains no parts", manifestPath)
+		}
+		seenParts := make(map[string]struct{}, len(manifest.Parts))
 		for _, partASIN := range manifest.Parts {
 			if !validASIN(partASIN) {
 				return fmt.Errorf("part manifest %s contains invalid part ASIN %q", manifestPath, partASIN)
 			}
+			if _, exists := seenParts[partASIN]; exists {
+				return fmt.Errorf("part manifest %s contains duplicate part ASIN %q", manifestPath, partASIN)
+			}
+			seenParts[partASIN] = struct{}{}
 		}
 
 		dir := filepath.Dir(manifestPath)
@@ -425,7 +513,9 @@ func (a *App) mergeParts(ctx context.Context) error {
 		}
 
 		fmt.Printf("Merging %d parts -> %s\n", len(partPaths), outputPath)
-		if err := a.Converter.ConcatM4B(ctx, listPath, outputPath); err != nil {
+		if err := a.convertAndCommit(outputPath, func(partialPath string) error {
+			return a.Converter.ConcatM4B(ctx, listPath, partialPath)
+		}); err != nil {
 			return fmt.Errorf("failed to merge parts for %s: %w", manifest.ASIN, err)
 		}
 
@@ -437,12 +527,46 @@ func (a *App) mergeParts(ctx context.Context) error {
 				fmt.Fprintf(os.Stderr, "Failed to remove merged part %s: %v\n", partPath, err)
 			}
 		}
+		for _, partASIN := range manifest.Parts {
+			if err := a.removeMergedPartInputs(dir, partASIN); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to remove merged inputs for %s: %v\n", partASIN, err)
+			}
+		}
 		if err := a.FS.Remove(manifestPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to remove part manifest %s: %v\n", manifestPath, err)
 		}
 	}
 
 	return nil
+}
+
+func (a *App) removeMergedPartInputs(dir, asin string) error {
+	files, err := a.FS.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		name := file.Name()
+		if !isAudiblePartFile(name, asin) {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".aax" && ext != ".aaxc" && ext != ".voucher" && !(ext == ".json" && strings.HasSuffix(strings.ToLower(name), "-chapters.json")) {
+			continue
+		}
+		if err := a.FS.Remove(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isAudiblePartFile(name, asin string) bool {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	if !strings.HasPrefix(base, asin) {
+		return false
+	}
+	return len(base) == len(asin) || base[len(asin)] == '-' || base[len(asin)] == '_'
 }
 
 func escapeFFconcatPath(path string) string {
@@ -507,8 +631,8 @@ func (a *App) Clean(ctx context.Context) error {
 		if d.IsDir() {
 			return nil
 		}
-		switch strings.ToLower(filepath.Ext(d.Name())) {
-		case ".aaxc", ".aax", ".jpg", ".json", ".voucher", ".pdf":
+		output, removable := completedOutputForIntermediate(path)
+		if removable && fileExistsFS(a.FS, output) {
 			if err := a.FS.Remove(path); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", path, err)
 			}
@@ -519,6 +643,21 @@ func (a *App) Clean(ctx context.Context) error {
 		return fmt.Errorf("failed to clean media directory: %w", err)
 	}
 	return nil
+}
+
+func completedOutputForIntermediate(path string) (string, bool) {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".aax"), strings.HasSuffix(lower, ".aaxc"):
+		return conversionOutputPath(path), true
+	case strings.HasSuffix(lower, ".voucher"):
+		return conversionOutputPath(strings.TrimSuffix(path, filepath.Ext(path)) + ".aaxc"), true
+	case strings.HasSuffix(lower, "-chapters.json"):
+		base := path[:len(path)-len("-chapters.json")]
+		return conversionOutputPath(base + ".aaxc"), true
+	default:
+		return "", false
+	}
 }
 
 func (a *App) Status(ctx context.Context, showTable bool) error {

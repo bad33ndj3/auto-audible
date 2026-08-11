@@ -75,17 +75,23 @@ type fakeConverter struct {
 
 func (f *fakeConverter) ConvertAAX(ctx context.Context, inputPath, outputPath, activationBytes string) error {
 	f.aaxCalls = append(f.aaxCalls, struct{ input, output, bytes string }{inputPath, outputPath, activationBytes})
-	if f.writeOutput {
+	if f.fs != nil && (f.writeOutput || f.aaxErr == nil) {
 		f.fs.files[outputPath] = []byte("partial")
 	}
 	return f.aaxErr
 }
 func (f *fakeConverter) ConvertAAXC(ctx context.Context, inputPath, outputPath, key, iv string) error {
 	f.aaxcCalls = append(f.aaxcCalls, struct{ input, output, key, iv string }{inputPath, outputPath, key, iv})
+	if f.fs != nil && (f.writeOutput || f.aaxcErr == nil) {
+		f.fs.files[outputPath] = []byte("partial")
+	}
 	return f.aaxcErr
 }
 func (f *fakeConverter) ConcatM4B(ctx context.Context, listPath, outputPath string) error {
 	f.concatCalls = append(f.concatCalls, struct{ listPath, output string }{listPath, outputPath})
+	if f.fs != nil && (f.writeOutput || f.concatErr == nil) {
+		f.fs.files[outputPath] = []byte("merged")
+	}
 	return f.concatErr
 }
 
@@ -109,10 +115,32 @@ func (f *fakeFS) MkdirAll(path string, perm os.FileMode) error {
 	return nil
 }
 func (f *fakeFS) ReadDir(name string) ([]os.DirEntry, error) {
-	entries, ok := f.entries[name]
-	if !ok {
+	entries, exists := f.entries[name]
+	if !exists {
+		for path := range f.files {
+			if filepath.Dir(path) == name {
+				exists = true
+				break
+			}
+		}
+	}
+	if !exists && !f.dirs[name] {
 		return nil, fmt.Errorf("no such file or directory")
 	}
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		seen[entry.Name()] = struct{}{}
+	}
+	for path := range f.files {
+		if filepath.Dir(path) != name {
+			continue
+		}
+		file := filepath.Base(path)
+		if _, ok := seen[file]; !ok {
+			entries = append(entries, &fakeDirEntry{name: file})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	return entries, nil
 }
 func (f *fakeFS) ReadFile(name string) ([]byte, error) {
@@ -143,8 +171,8 @@ func (f *fakeFS) Stat(name string) (os.FileInfo, error) {
 	if _, ok := f.dirs[name]; ok {
 		return &fakeFileInfo{name: filepath.Base(name), isDir: true}, nil
 	}
-	if _, ok := f.files[name]; ok {
-		return &fakeFileInfo{name: filepath.Base(name)}, nil
+	if data, ok := f.files[name]; ok {
+		return &fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
 	}
 	return nil, os.ErrNotExist
 }
@@ -172,10 +200,11 @@ func hasPrefix(s, prefix string) bool {
 type fakeFileInfo struct {
 	name  string
 	isDir bool
+	size  int64
 }
 
 func (f *fakeFileInfo) Name() string       { return f.name }
-func (f *fakeFileInfo) Size() int64        { return 0 }
+func (f *fakeFileInfo) Size() int64        { return f.size }
 func (f *fakeFileInfo) Mode() os.FileMode  { return 0 }
 func (f *fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (f *fakeFileInfo) IsDir() bool        { return f.isDir }
@@ -233,6 +262,7 @@ func TestDownload_SkipsAlreadyDownloaded(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true
 	fs.entries["media"] = []os.DirEntry{}
+	fs.files["media/First Book.m4b"] = []byte("ready")
 
 	store := &fakeStore{asins: []string{"B001"}}
 	audible := &fakeAudible{
@@ -242,11 +272,10 @@ func TestDownload_SkipsAlreadyDownloaded(t *testing.T) {
 		},
 	}
 	app := &App{
-		Audible:         audible,
-		FS:              fs,
-		Store:           store,
-		MediaDir:        "media",
-		DownloadWorkers: 1,
+		Audible:  audible,
+		FS:       fs,
+		Store:    store,
+		MediaDir: "media",
 	}
 
 	if err := app.Download(context.Background()); err != nil {
@@ -261,6 +290,96 @@ func TestDownload_SkipsAlreadyDownloaded(t *testing.T) {
 	}
 }
 
+func TestDownloadPlanShowsWhatSyncWillSkipAndDownload(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/Present Book.m4b"] = []byte("ready")
+	app := &App{
+		Audible:  &fakeAudible{library: []Book{{ASIN: "B001", Title: "Present Book"}, {ASIN: "B002", Title: "New Book"}}},
+		FS:       fs,
+		Store:    &fakeStore{asins: []string{"B001"}},
+		MediaDir: "media",
+	}
+
+	plan, err := app.DownloadPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plan.Present, []Book{{ASIN: "B001", Title: "Present Book"}}) {
+		t.Fatalf("present = %v", plan.Present)
+	}
+	if !reflect.DeepEqual(plan.Download, []Book{{ASIN: "B002", Title: "New Book"}}) {
+		t.Fatalf("download = %v", plan.Download)
+	}
+}
+
+func TestDownload_RetriesTrackedBookWhenMediaIsMissing(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+	store := &fakeStore{asins: []string{"B001"}}
+	audible := &fakeAudible{library: []Book{{ASIN: "B001", Title: "Missing Book"}}}
+	app := &App{Audible: audible, FS: fs, Store: store, MediaDir: "media"}
+
+	if err := app.Download(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(audible.downloaded, []string{"B001"}) {
+		t.Fatalf("missing tracked book was not retried: %v", audible.downloaded)
+	}
+}
+
+func TestDownload_UsesNoSeriesPrefixWithoutASeries(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+	fs.files["media/Standalone.m4b"] = []byte("ready")
+	audible := &fakeAudible{library: []Book{{ASIN: "B001", Title: "Standalone", SeriesSequence: "1"}}}
+	app := &App{Audible: audible, FS: fs, Store: &fakeStore{asins: []string{"B001"}}, MediaDir: "media"}
+
+	if err := app.Download(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(audible.downloaded) != 0 {
+		t.Fatalf("standalone book was unexpectedly redownloaded: %v", audible.downloaded)
+	}
+}
+
+func TestDownload_RetriesTrackedAAXCWithoutVoucher(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+	fs.files["media/Locked Book.aaxc"] = []byte("encrypted")
+	audible := &fakeAudible{library: []Book{{ASIN: "B001", Title: "Locked Book"}}}
+	app := &App{Audible: audible, FS: fs, Store: &fakeStore{asins: []string{"B001"}}, MediaDir: "media"}
+
+	if err := app.Download(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(audible.downloaded, []string{"B001"}) {
+		t.Fatalf("unconvertible AAXC was not retried: %v", audible.downloaded)
+	}
+}
+
+func TestDownload_RetriesTrackedBookWithStalePartsManifest(t *testing.T) {
+	fs := newFakeFS()
+	fs.dirs["media"] = true
+	fs.entries["media"] = []os.DirEntry{}
+	data, err := json.Marshal(partsManifest{ASIN: "B001", Parts: []string{"B002"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.files["media/B001-parts.json"] = data
+	audible := &fakeAudible{library: []Book{{ASIN: "B001", Title: "Split Book"}}}
+	app := &App{Audible: audible, FS: fs, Store: &fakeStore{asins: []string{"B001"}}, MediaDir: "media"}
+
+	if err := app.Download(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(audible.downloaded, []string{"B001"}) {
+		t.Fatalf("stale parts manifest was not retried: %v", audible.downloaded)
+	}
+}
+
 func TestDownload_CreatesSeriesDirectory(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true
@@ -270,15 +389,14 @@ func TestDownload_CreatesSeriesDirectory(t *testing.T) {
 	store := &fakeStore{}
 	audible := &fakeAudible{
 		library: []Book{
-			{ASIN: "B003", Title: "Series Book", SeriesTitle: "My Series", SeriesSequence: float64(2)},
+			{ASIN: "B003", Title: "Series Book", SeriesTitle: "My Series", SeriesSequence: "2"},
 		},
 	}
 	app := &App{
-		Audible:         audible,
-		FS:              fs,
-		Store:           store,
-		MediaDir:        "media",
-		DownloadWorkers: 1,
+		Audible:  audible,
+		FS:       fs,
+		Store:    store,
+		MediaDir: "media",
 	}
 
 	if err := app.Download(context.Background()); err != nil {
@@ -305,11 +423,10 @@ func TestDownload_WritesPartsManifestForMultiPartBook(t *testing.T) {
 		},
 	}
 	app := &App{
-		Audible:         audible,
-		FS:              fs,
-		Store:           store,
-		MediaDir:        "media",
-		DownloadWorkers: 1,
+		Audible:  audible,
+		FS:       fs,
+		Store:    store,
+		MediaDir: "media",
 	}
 
 	if err := app.Download(context.Background()); err != nil {
@@ -352,11 +469,10 @@ func TestDownload_NoManifestForSinglePartBook(t *testing.T) {
 		},
 	}
 	app := &App{
-		Audible:         audible,
-		FS:              fs,
-		Store:           store,
-		MediaDir:        "media",
-		DownloadWorkers: 1,
+		Audible:  audible,
+		FS:       fs,
+		Store:    store,
+		MediaDir: "media",
 	}
 
 	if err := app.Download(context.Background()); err != nil {
@@ -382,11 +498,10 @@ func TestDownload_ReturnsDownloadErrors(t *testing.T) {
 		downloadErr: errors.New("network error"),
 	}
 	app := &App{
-		Audible:         audible,
-		FS:              fs,
-		Store:           store,
-		MediaDir:        "media",
-		DownloadWorkers: 1,
+		Audible:  audible,
+		FS:       fs,
+		Store:    store,
+		MediaDir: "media",
 	}
 
 	if err := app.Download(context.Background()); err == nil {
@@ -404,11 +519,10 @@ func TestDownload_ReturnsStoreErrors(t *testing.T) {
 	fs.entries["media"] = []os.DirEntry{}
 
 	app := &App{
-		Audible:         &fakeAudible{library: []Book{{ASIN: "B001", Title: "Book"}}},
-		FS:              fs,
-		Store:           &fakeStore{saveErr: errors.New("disk full")},
-		MediaDir:        "media",
-		DownloadWorkers: 1,
+		Audible:  &fakeAudible{library: []Book{{ASIN: "B001", Title: "Book"}}},
+		FS:       fs,
+		Store:    &fakeStore{saveErr: errors.New("disk full")},
+		MediaDir: "media",
 	}
 
 	if err := app.Download(context.Background()); err == nil {
@@ -421,19 +535,43 @@ func TestDownload_ReturnsPostProcessingErrors(t *testing.T) {
 	fs.dirs["media"] = true
 	fs.entries["media"] = []os.DirEntry{}
 
+	store := &fakeStore{}
 	app := &App{
 		Audible: &fakeAudible{
 			library:       []Book{{ASIN: "B001", Title: "Book"}},
 			audioPartsErr: errors.New("parts lookup failed"),
 		},
-		FS:              fs,
-		Store:           &fakeStore{},
-		MediaDir:        "media",
-		DownloadWorkers: 1,
+		FS:       fs,
+		Store:    store,
+		MediaDir: "media",
 	}
 
 	if err := app.Download(context.Background()); err == nil {
 		t.Fatal("expected post-processing failures to be returned")
+	}
+	if len(store.asins) != 0 {
+		t.Fatalf("failed post-processing must remain retryable, recorded %v", store.asins)
+	}
+}
+
+func TestSyncConvertsExistingMediaAfterADownloadFailure(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/existing.aax"] = []byte("aax")
+	converter := &fakeConverter{fs: fs}
+	app := &App{
+		Audible:   &fakeAudible{library: []Book{{ASIN: "B001", Title: "New Book"}}, downloadErr: errors.New("network"), activationBytes: "a1b2c3d4"},
+		Converter: converter,
+		FS:        fs,
+		Store:     &fakeStore{},
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+
+	if err := sync(context.Background(), app); err == nil {
+		t.Fatal("expected the failed download to be reported")
+	}
+	if _, ok := fs.files["media/existing.m4b"]; !ok {
+		t.Fatal("existing media was not converted after the download failure")
 	}
 }
 
@@ -443,7 +581,7 @@ func TestConvert_CallsConverterWithActivationBytes(t *testing.T) {
 	fs.files["media/book2.aaxc"] = []byte("aaxc data")
 	fs.files["media/book2.voucher"] = []byte(`{"content_license":{"license_response":{"key":"key1","iv":"iv1"}}}`)
 
-	converter := &fakeConverter{}
+	converter := &fakeConverter{fs: fs}
 	audible := &fakeAudible{activationBytes: "a1b2c3d4"}
 	app := &App{
 		Audible:   audible,
@@ -475,7 +613,7 @@ func TestConvert_SkipsExistingOutput(t *testing.T) {
 	fs := newFakeFS()
 	fs.files["media/book.aax"] = []byte("aax data")
 	fs.files["media/book.m4b"] = []byte("finished")
-	converter := &fakeConverter{}
+	converter := &fakeConverter{fs: fs}
 	app := &App{
 		Audible:   &fakeAudible{},
 		Converter: converter,
@@ -489,6 +627,35 @@ func TestConvert_SkipsExistingOutput(t *testing.T) {
 	}
 	if len(converter.aaxCalls) != 0 {
 		t.Fatal("expected existing output to be preserved")
+	}
+}
+
+func TestConvert_CommitsOutputAtomically(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/book.aax"] = []byte("aax data")
+	converter := &fakeConverter{fs: fs, writeOutput: true}
+	app := &App{
+		Audible:   &fakeAudible{activationBytes: "a1b2c3d4"},
+		Converter: converter,
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+
+	if err := app.Convert(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := converter.aaxCalls[0].output; got != "media/book.partial.m4b" {
+		t.Fatalf("converter output %q must retain the .m4b extension", got)
+	}
+	if _, ok := fs.files["media/book.m4b"]; !ok {
+		t.Fatal("completed conversion was not committed")
+	}
+	if _, ok := fs.files["media/book.aax"]; ok {
+		t.Fatal("committed conversion did not release its source file")
+	}
+	if _, ok := fs.files["media/book.partial.m4b"]; ok {
+		t.Fatal("partial output remains after commit")
 	}
 }
 
@@ -528,8 +695,11 @@ func TestConvert_MergesMultiPartBook(t *testing.T) {
 	fs.files["media/B0DWPNQK52.m4b"] = []byte("part1")
 	fs.files["media/B0DWP16T86.m4b"] = []byte("part2")
 	fs.files["media/B0DWP7S13J.m4b"] = []byte("part3")
+	fs.files["media/B0DWPNQK52.aax"] = []byte("source1")
+	fs.files["media/B0DWP16T86.aaxc"] = []byte("source2")
+	fs.files["media/B0DWP16T86.voucher"] = []byte("voucher2")
 
-	converter := &fakeConverter{}
+	converter := &fakeConverter{fs: fs}
 	app := &App{
 		Audible:   &fakeAudible{},
 		Converter: converter,
@@ -545,8 +715,11 @@ func TestConvert_MergesMultiPartBook(t *testing.T) {
 	if len(converter.concatCalls) != 1 {
 		t.Fatalf("expected 1 concat call, got %d", len(converter.concatCalls))
 	}
-	if converter.concatCalls[0].output != "media/This Inevitable Ruin.m4b" {
+	if converter.concatCalls[0].output != "media/This Inevitable Ruin.partial.m4b" {
 		t.Fatalf("unexpected concat output: %s", converter.concatCalls[0].output)
+	}
+	if _, ok := fs.files["media/This Inevitable Ruin.m4b"]; !ok {
+		t.Fatal("merged book was not atomically committed")
 	}
 
 	if _, ok := fs.files["media/B0DWPNQK52.m4b"]; ok {
@@ -560,6 +733,11 @@ func TestConvert_MergesMultiPartBook(t *testing.T) {
 	}
 	if _, ok := fs.files["media/B0DK2815FK-parts.json"]; ok {
 		t.Fatal("expected manifest to be removed after merge")
+	}
+	for _, path := range []string{"media/B0DWPNQK52.aax", "media/B0DWP16T86.aaxc", "media/B0DWP16T86.voucher"} {
+		if _, ok := fs.files[path]; ok {
+			t.Fatalf("expected merged-part source %s to be removed", path)
+		}
 	}
 }
 
@@ -660,6 +838,34 @@ func TestConvert_RejectsUnsafePartASIN(t *testing.T) {
 	}
 }
 
+func TestConvert_RejectsUnsafeMultipartOutput(t *testing.T) {
+	fs := newFakeFS()
+	data, err := json.Marshal(partsManifest{
+		ASIN:       "B001",
+		Parts:      []string{"B002"},
+		OutputBase: "../outside",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.files["media/B001-parts.json"] = data
+	fs.files["media/B002.m4b"] = []byte("part")
+	app := &App{
+		Audible:   &fakeAudible{},
+		Converter: &fakeConverter{},
+		FS:        fs,
+		MediaDir:  "media",
+		lookPath:  func(string) (string, error) { return "/usr/bin/ffmpeg", nil },
+	}
+
+	if err := app.Convert(context.Background()); err == nil {
+		t.Fatal("expected path-traversing multipart output to be rejected")
+	}
+	if _, ok := fs.files["media/B002.m4b"]; !ok {
+		t.Fatal("part was removed after rejecting unsafe manifest")
+	}
+}
+
 func TestEscapeFFconcatPath(t *testing.T) {
 	got := escapeFFconcatPath("/media/Reader's Series/part.m4b")
 	want := "/media/Reader'\\''s Series/part.m4b"
@@ -679,49 +885,32 @@ func TestConvert_ReturnsErrorWhenFfmpegMissing(t *testing.T) {
 	}
 }
 
-func TestClean_RemovesOnlyIntermediateFiles(t *testing.T) {
+func TestClean_RemovesOnlyInputsForCompletedBooks(t *testing.T) {
 	fs := newFakeFS()
-	fs.files["media/book.aax"] = []byte("x")
-	fs.files["media/book.aaxc"] = []byte("x")
+	fs.files["media/done.aax"] = []byte("x")
+	fs.files["media/done.voucher"] = []byte("x")
+	fs.files["media/done-chapters.json"] = []byte("x")
+	fs.files["media/done.m4b"] = []byte("x")
+	fs.files["media/pending.aaxc"] = []byte("x")
+	fs.files["media/pending.voucher"] = []byte("x")
 	fs.files["media/book.jpg"] = []byte("x")
 	fs.files["media/book.json"] = []byte("x")
-	fs.files["media/book.voucher"] = []byte("x")
 	fs.files["media/book.pdf"] = []byte("x")
-	fs.files["media/LOUD.AAX"] = []byte("x")
-	fs.files["media/book.m4b"] = []byte("x")
-	fs.files["media/book.txt"] = []byte("x")
 
 	app := &App{FS: fs, MediaDir: "media"}
 	if err := app.Clean(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if _, ok := fs.files["media/book.m4b"]; !ok {
-		t.Fatal("expected .m4b to be preserved")
+	for _, path := range []string{"media/done.aax", "media/done.voucher", "media/done-chapters.json"} {
+		if _, ok := fs.files[path]; ok {
+			t.Fatalf("expected completed-book input %s to be removed", path)
+		}
 	}
-	if _, ok := fs.files["media/book.txt"]; !ok {
-		t.Fatal("expected .txt to be preserved")
-	}
-	if _, ok := fs.files["media/book.aax"]; ok {
-		t.Fatal("expected .aax to be removed")
-	}
-	if _, ok := fs.files["media/book.aaxc"]; ok {
-		t.Fatal("expected .aaxc to be removed")
-	}
-	if _, ok := fs.files["media/book.jpg"]; ok {
-		t.Fatal("expected .jpg to be removed")
-	}
-	if _, ok := fs.files["media/book.json"]; ok {
-		t.Fatal("expected .json to be removed")
-	}
-	if _, ok := fs.files["media/book.voucher"]; ok {
-		t.Fatal("expected .voucher to be removed")
-	}
-	if _, ok := fs.files["media/book.pdf"]; ok {
-		t.Fatal("expected .pdf to be removed")
-	}
-	if _, ok := fs.files["media/LOUD.AAX"]; ok {
-		t.Fatal("expected uppercase .AAX to be removed")
+	for _, path := range []string{"media/done.m4b", "media/pending.aaxc", "media/pending.voucher", "media/book.jpg", "media/book.json", "media/book.pdf"} {
+		if _, ok := fs.files[path]; !ok {
+			t.Fatalf("expected %s to be preserved", path)
+		}
 	}
 }
 
