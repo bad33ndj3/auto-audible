@@ -32,6 +32,7 @@ The wrapper will also detect missing setup and ask to run it when you start the 
 
 ```bash
 go run . sync     [--profile audible] [--password secret] [--media-dir media]
+go run . plan     [--profile audible] [--password secret] [--media-dir media]
 go run . download [--profile audible] [--password secret] [--media-dir media]
 go run . convert  [--profile audible] [--password secret] [--media-dir media]
 go run . clean    [--media-dir media]
@@ -43,6 +44,7 @@ go run . status   --table [--profile audible] [--password secret] [--media-dir m
 Command summary:
 
 - `sync`: the normal command: download, convert, safely remove completed conversion inputs, and print what is ready
+- `plan`: lists the exact titles the next `sync` will skip and download; it never writes media
 - `all`: deprecated alias for `sync`, retained for existing scripts
 - `download`: exports the Audible library and downloads missing books; tracked books are retried if their media vanished
 - `convert`: converts `.aax` and `.aaxc` files in the media directory to `.m4b`
@@ -109,6 +111,7 @@ For `.aaxc`, conversion requires the matching `.voucher` file (same basename) be
 ```bash
 task
 task sync
+task plan
 task download
 task convert
 task clean

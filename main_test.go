@@ -464,3 +464,9 @@ func TestCommandsKeepAllAsASyncAlias(t *testing.T) {
 		t.Fatal("all must remain a documented migration alias for sync")
 	}
 }
+
+func TestCommandsExposePlan(t *testing.T) {
+	if _, ok := buildCommands()["plan"]; !ok {
+		t.Fatal("missing plan command")
+	}
+}

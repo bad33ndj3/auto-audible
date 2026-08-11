@@ -20,6 +20,11 @@ tasks:
     cmds:
       - go run . sync {{.CLI_ARGS}}
 
+  plan:
+    desc: Show what sync will skip and download
+    cmds:
+      - go run . plan {{.CLI_ARGS}}
+
   all:
     desc: Deprecated alias for sync
     cmds:

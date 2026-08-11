@@ -77,25 +77,15 @@ func (a *App) Download(ctx context.Context) error {
 		return fmt.Errorf("failed to create media directory: %w", err)
 	}
 
-	items, err := a.Audible.ExportLibrary(ctx)
+	plan, err := a.DownloadPlan(ctx)
 	if err != nil {
 		return err
 	}
-
-	if len(items) == 0 {
+	if len(plan.Present)+len(plan.Download) == 0 {
 		fmt.Println("No library items found in Audible export")
 		return nil
 	}
-
-	downloaded, err := a.Store.Load()
-	if err != nil {
-		return fmt.Errorf("failed to load downloaded ASINs: %w", err)
-	}
-
-	downloadedSet := make(map[string]struct{}, len(downloaded))
-	for _, asin := range downloaded {
-		downloadedSet[asin] = struct{}{}
-	}
+	downloaded := plan.downloaded
 
 	type job struct {
 		item      Book
@@ -104,13 +94,7 @@ func (a *App) Download(ctx context.Context) error {
 	}
 
 	var jobs []job
-	for _, item := range items {
-		asin := item.ASIN
-		if _, ok := downloadedSet[asin]; ok && a.hasBookMedia(item) {
-			fmt.Printf("ASIN %s already downloaded, skipping.\n", asin)
-			continue
-		}
-
+	for _, item := range plan.Download {
 		outputDir := a.MediaDir
 		seriesTitle := strings.TrimSpace(item.SeriesTitle)
 		hasSeries := seriesTitle != ""
@@ -157,6 +141,30 @@ func (a *App) Download(ctx context.Context) error {
 		return fmt.Errorf("failed to download or record %d book(s)", failed)
 	}
 	return nil
+}
+
+func (a *App) DownloadPlan(ctx context.Context) (DownloadPlan, error) {
+	items, err := a.Audible.ExportLibrary(ctx)
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	downloaded, err := a.Store.Load()
+	if err != nil {
+		return DownloadPlan{}, fmt.Errorf("failed to load downloaded ASINs: %w", err)
+	}
+	tracked := make(map[string]struct{}, len(downloaded))
+	for _, asin := range downloaded {
+		tracked[asin] = struct{}{}
+	}
+	plan := DownloadPlan{downloaded: downloaded}
+	for _, item := range items {
+		if _, ok := tracked[item.ASIN]; ok && a.hasBookMedia(item) {
+			plan.Present = append(plan.Present, item)
+			continue
+		}
+		plan.Download = append(plan.Download, item)
+	}
+	return plan, nil
 }
 
 func (a *App) hasBookMedia(book Book) bool {

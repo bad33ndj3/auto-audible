@@ -290,6 +290,28 @@ func TestDownload_SkipsAlreadyDownloaded(t *testing.T) {
 	}
 }
 
+func TestDownloadPlanShowsWhatSyncWillSkipAndDownload(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/Present Book.m4b"] = []byte("ready")
+	app := &App{
+		Audible:  &fakeAudible{library: []Book{{ASIN: "B001", Title: "Present Book"}, {ASIN: "B002", Title: "New Book"}}},
+		FS:       fs,
+		Store:    &fakeStore{asins: []string{"B001"}},
+		MediaDir: "media",
+	}
+
+	plan, err := app.DownloadPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plan.Present, []Book{{ASIN: "B001", Title: "Present Book"}}) {
+		t.Fatalf("present = %v", plan.Present)
+	}
+	if !reflect.DeepEqual(plan.Download, []Book{{ASIN: "B002", Title: "New Book"}}) {
+		t.Fatalf("download = %v", plan.Download)
+	}
+}
+
 func TestDownload_RetriesTrackedBookWhenMediaIsMissing(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true

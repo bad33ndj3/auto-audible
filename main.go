@@ -118,6 +118,19 @@ func buildCommands() map[string]cmdSpec {
 				return app.ReadySummary()
 			},
 		},
+		"plan": {
+			Name:         "plan",
+			Desc:         "Show what sync will skip and download",
+			NeedsAudible: true,
+			Run: func(ctx context.Context, app *App, _ *flag.FlagSet) error {
+				plan, err := app.DownloadPlan(ctx)
+				if err != nil {
+					return err
+				}
+				printDownloadPlan(plan)
+				return nil
+			},
+		},
 		"convert": {
 			Name:         "convert",
 			Desc:         "Convert .aax/.aaxc files to .m4b",
@@ -192,6 +205,17 @@ func sync(ctx context.Context, app *App) error {
 	return errors.Join(errs...)
 }
 
+func printDownloadPlan(plan DownloadPlan) {
+	fmt.Printf("Already present; sync will skip: %d\n", len(plan.Present))
+	for _, book := range plan.Present {
+		fmt.Printf("  - %s (%s)\n", book.Title, book.ASIN)
+	}
+	fmt.Printf("Will download: %d\n", len(plan.Download))
+	for _, book := range plan.Download {
+		fmt.Printf("  - %s (%s)\n", book.Title, book.ASIN)
+	}
+}
+
 func printUsage(commands map[string]cmdSpec) {
 	w := tabwriter.NewWriter(os.Stderr, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(os.Stderr, "Usage: auto-audible <command> [flags]")
@@ -236,7 +260,7 @@ func hasFlags(fs *flag.FlagSet) bool {
 }
 
 func commandOrder(commands map[string]cmdSpec) []string {
-	order := []string{"sync", "status", "download", "convert", "clean", "ready"}
+	order := []string{"sync", "plan", "status", "download", "convert", "clean", "ready"}
 	result := make([]string, 0, len(commands))
 	for _, name := range order {
 		if _, ok := commands[name]; ok {

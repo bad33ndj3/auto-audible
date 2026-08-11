@@ -53,6 +53,13 @@ type MediaInfo struct {
 	HasAAXC bool
 }
 
+// DownloadPlan is the exact reconciliation result a sync uses before downloading.
+type DownloadPlan struct {
+	Present    []Book
+	Download   []Book
+	downloaded []string
+}
+
 // partsManifest records the ordered part ASINs Audible split a book's
 // audio into, so the converted .m4b parts can be merged back together.
 type partsManifest struct {
