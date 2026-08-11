@@ -330,6 +330,11 @@ func (a *App) Convert(ctx context.Context) error {
 		}); err != nil {
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
+			continue
+		}
+		if err := a.FS.Remove(inputPath); err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "Failed to remove converted source %s: %v\n", inputPath, err)
 		}
 	}
 
@@ -350,6 +355,11 @@ func (a *App) Convert(ctx context.Context) error {
 		}); err != nil {
 			failed++
 			fmt.Fprintf(os.Stderr, "Failed to convert %s: %v\n", inputPath, err)
+			continue
+		}
+		if err := a.FS.Remove(inputPath); err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "Failed to remove converted source %s: %v\n", inputPath, err)
 		}
 	}
 

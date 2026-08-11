@@ -629,6 +629,9 @@ func TestConvert_CommitsOutputAtomically(t *testing.T) {
 	if _, ok := fs.files["media/book.m4b"]; !ok {
 		t.Fatal("completed conversion was not committed")
 	}
+	if _, ok := fs.files["media/book.aax"]; ok {
+		t.Fatal("committed conversion did not release its source file")
+	}
 	if _, ok := fs.files["media/book.partial.m4b"]; ok {
 		t.Fatal("partial output remains after commit")
 	}
