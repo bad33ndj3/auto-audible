@@ -56,8 +56,18 @@ type MediaInfo struct {
 // DownloadPlan is the exact reconciliation result a sync uses before downloading.
 type DownloadPlan struct {
 	Present    []Book
+	Offloaded  []Book
 	Download   []Book
 	downloaded []string
+}
+
+type OffloadPlan struct {
+	Entries []OffloadEntry
+}
+
+type OffloadEntry struct {
+	Book Book
+	Path string
 }
 
 // partsManifest records the ordered part ASINs Audible split a book's
@@ -136,6 +146,10 @@ func extractActivationBytes(output string) string {
 }
 
 func computeBookState(tracked bool, info MediaInfo) string {
+	return computeBookStateWithOffloaded(tracked, false, info)
+}
+
+func computeBookStateWithOffloaded(tracked, offloaded bool, info MediaInfo) string {
 	if info.HasM4B {
 		return "ready"
 	}
@@ -144,6 +158,9 @@ func computeBookState(tracked bool, info MediaInfo) string {
 	}
 	if info.HasAAXC {
 		return "needs_convert_aaxc"
+	}
+	if offloaded {
+		return "offloaded"
 	}
 	if tracked {
 		return "tracked_no_media"

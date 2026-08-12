@@ -280,6 +280,10 @@ func newJSONASINStore(mediaDir string) *jsonASINStore {
 	return store
 }
 
+func newJSONOffloadedASINStore(mediaDir string) *jsonASINStore {
+	return &jsonASINStore{path: filepath.Join(mediaDir, ".auto-audible-offloaded.json")}
+}
+
 func (s *jsonASINStore) Load() ([]string, error) {
 	path := s.path
 	if _, err := os.Stat(path); err != nil {
