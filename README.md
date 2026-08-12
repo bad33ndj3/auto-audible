@@ -27,6 +27,7 @@ go run . plan     [--profile audible] [--password secret] [--media-dir media]
 go run . download [--profile audible] [--password secret] [--media-dir media]
 go run . convert  [--profile audible] [--password secret] [--media-dir media]
 go run . clean    [--media-dir media]
+go run . offload  --all [--yes] [--profile audible] [--password secret] [--media-dir media]
 go run . ready    [--media-dir media]
 go run . status   [--profile audible] [--password secret] [--media-dir media]
 go run . status   --table [--profile audible] [--password secret] [--media-dir media]
@@ -34,7 +35,9 @@ go run . status   --table [--profile audible] [--password secret] [--media-dir m
 
 `sync` is the one you actually want day to day: it downloads, converts, removes conversion inputs that are no longer needed, and prints what's ready to listen to. `plan` does the same lookup but only prints what `sync` would download and skip — it never touches disk. Use it to check before committing to a run. `all` is a deprecated alias for `sync`, kept around for old scripts.
 
-The rest break the pipeline into steps: `download` exports your library and pulls anything missing (retrying books whose media disappeared), `convert` turns `.aax`/`.aaxc` into `.m4b`, `clean` deletes `.aax`, `.aaxc`, `.voucher`, and `-chapters.json` files once their `.m4b` exists — it leaves covers, PDFs, and anything else alone. `ready` lists what's listenable and what's still pending. `status` gives you counts (library size, tracked, remaining, ready, pending); `status --table` lists every title with its state: `ready`, `needs_convert_aax`, `needs_convert_aaxc`, `tracked_no_media`, or `not_downloaded`.
+After Audiobookshelf has imported your ready books, run `offload --all` to preview the exact `.m4b` files and Audible titles. Run it again with `--yes` to record them as offloaded and delete the local `.m4b` files. Future syncs skip offloaded titles. The command does not verify Audiobookshelf uploads; it intentionally trusts your confirmation and refuses to change anything if a local `.m4b` cannot map unambiguously to one Audible title.
+
+The rest break the pipeline into steps: `download` exports your library and pulls anything missing (retrying books whose media disappeared), `convert` turns `.aax`/`.aaxc` into `.m4b`, `clean` deletes `.aax`, `.aaxc`, `.voucher`, and `-chapters.json` files once their `.m4b` exists — it leaves covers, PDFs, and anything else alone. `ready` lists what's listenable and what's still pending. `status` gives you counts (library size, tracked, offloaded, remaining, ready, pending); `status --table` lists every title with its state: `ready`, `needs_convert_aax`, `needs_convert_aaxc`, `offloaded`, `tracked_no_media`, or `not_downloaded`.
 
 Downloads run one at a time on purpose. Audible itself is the bottleneck, and a single ordered flow keeps the tracking file from getting corrupted by concurrent writes.
 
@@ -59,7 +62,7 @@ media/
 └── The Phoenix Project.m4b
 ```
 
-Standalone books stay at the top level. `convert`, `clean`, `ready`, and `status` all walk the full `media/` tree recursively, so the folder structure doesn't matter to them.
+Standalone books stay at the top level. `convert`, `clean`, `offload`, `ready`, and `status` all walk the full `media/` tree recursively, so the folder structure doesn't matter to them.
 
 For conversion, `auto-audible` asks `audible-cli` for activation bytes and hands off to `ffmpeg`. `.aaxc` files need their matching `.voucher` file (same basename) alongside them — that's where the decryption key and IV live. No voucher, no conversion.
 

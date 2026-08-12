@@ -18,6 +18,7 @@ type App struct {
 	Converter   MediaConverter
 	FS          FileSystem
 	Store       ASINStore
+	Offloaded   ASINStore
 	Prompter    Prompter
 	MediaDir    string
 	lookPath    func(string) (string, error)
@@ -156,8 +157,16 @@ func (a *App) DownloadPlan(ctx context.Context) (DownloadPlan, error) {
 	for _, asin := range downloaded {
 		tracked[asin] = struct{}{}
 	}
+	offloaded, err := a.loadOffloaded()
+	if err != nil {
+		return DownloadPlan{}, err
+	}
 	plan := DownloadPlan{downloaded: downloaded}
 	for _, item := range items {
+		if _, ok := offloaded[item.ASIN]; ok {
+			plan.Offloaded = append(plan.Offloaded, item)
+			continue
+		}
 		if _, ok := tracked[item.ASIN]; ok && a.hasBookMedia(item) {
 			plan.Present = append(plan.Present, item)
 			continue
@@ -165,6 +174,107 @@ func (a *App) DownloadPlan(ctx context.Context) (DownloadPlan, error) {
 		plan.Download = append(plan.Download, item)
 	}
 	return plan, nil
+}
+
+func (a *App) loadOffloaded() (map[string]struct{}, error) {
+	offloaded := map[string]struct{}{}
+	if a.Offloaded == nil {
+		return offloaded, nil
+	}
+	asins, err := a.Offloaded.Load()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load offloaded ASINs: %w", err)
+	}
+	for _, asin := range asins {
+		offloaded[asin] = struct{}{}
+	}
+	return offloaded, nil
+}
+
+func (a *App) OffloadPlan(ctx context.Context) (OffloadPlan, error) {
+	paths, err := findFilesRecursiveFS(a.FS, a.MediaDir, ".m4b")
+	if err != nil {
+		return OffloadPlan{}, fmt.Errorf("failed to list ready .m4b files: %w", err)
+	}
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		return OffloadPlan{}, nil
+	}
+
+	items, err := a.Audible.ExportLibrary(ctx)
+	if err != nil {
+		return OffloadPlan{}, err
+	}
+	byPath := make(map[string][]Book, len(items))
+	for _, item := range items {
+		byPath[a.bookM4BPath(item)] = append(byPath[a.bookM4BPath(item)], item)
+	}
+
+	plan := OffloadPlan{Entries: make([]OffloadEntry, 0, len(paths))}
+	for _, path := range paths {
+		matches := byPath[path]
+		if len(matches) == 0 {
+			return OffloadPlan{}, fmt.Errorf("cannot offload %s: no matching Audible library title", path)
+		}
+		if len(matches) > 1 {
+			return OffloadPlan{}, fmt.Errorf("cannot offload %s: matches multiple Audible library titles", path)
+		}
+		plan.Entries = append(plan.Entries, OffloadEntry{Book: matches[0], Path: path})
+	}
+	return plan, nil
+}
+
+func (a *App) bookM4BPath(book Book) string {
+	dir := a.MediaDir
+	prefix := ""
+	if series := strings.TrimSpace(book.SeriesTitle); series != "" {
+		dir = filepath.Join(dir, sanitizeFileName(series))
+		prefix = formatPrefix(book.SeriesSequence)
+	}
+	return filepath.Join(dir, prefix+sanitizeFileName(book.Title)+".m4b")
+}
+
+func (a *App) Offload(ctx context.Context, confirm bool) error {
+	plan, err := a.OffloadPlan(ctx)
+	if err != nil {
+		return err
+	}
+	if len(plan.Entries) == 0 {
+		fmt.Println("No ready .m4b files to offload")
+		return nil
+	}
+	for _, entry := range plan.Entries {
+		fmt.Printf("  - %s (%s): %s\n", entry.Book.Title, entry.Book.ASIN, entry.Path)
+	}
+	if !confirm {
+		fmt.Println("Preview only; rerun with --yes to mark these titles offloaded and delete their .m4b files")
+		return nil
+	}
+	if a.Offloaded == nil {
+		return fmt.Errorf("offloaded ASIN store is not configured")
+	}
+
+	offloaded, err := a.loadOffloaded()
+	if err != nil {
+		return err
+	}
+	for _, entry := range plan.Entries {
+		offloaded[entry.Book.ASIN] = struct{}{}
+	}
+	asins := make([]string, 0, len(offloaded))
+	for asin := range offloaded {
+		asins = append(asins, asin)
+	}
+	if err := a.Offloaded.Save(asins); err != nil {
+		return fmt.Errorf("failed to record offloaded ASINs: %w", err)
+	}
+	for _, entry := range plan.Entries {
+		if err := a.FS.Remove(entry.Path); err != nil {
+			return fmt.Errorf("failed to remove offloaded file %s: %w", entry.Path, err)
+		}
+	}
+	fmt.Printf("Offloaded %d book(s)\n", len(plan.Entries))
+	return nil
 }
 
 func (a *App) hasBookMedia(book Book) bool {
@@ -674,6 +784,10 @@ func (a *App) Status(ctx context.Context, showTable bool) error {
 	for _, asin := range downloaded {
 		downloadedSet[asin] = struct{}{}
 	}
+	offloadedSet, err := a.loadOffloaded()
+	if err != nil {
+		return err
+	}
 
 	state, err := a.scanMediaState()
 	if err != nil {
@@ -694,13 +808,28 @@ func (a *App) Status(ctx context.Context, showTable bool) error {
 	}
 
 	trackedInLibrary := 0
+	offloadedInLibrary := 0
 	for _, asin := range downloaded {
 		if _, ok := librarySet[asin]; ok {
 			trackedInLibrary++
 		}
 	}
+	for asin := range offloadedSet {
+		if _, ok := librarySet[asin]; ok {
+			offloadedInLibrary++
+		}
+	}
 
-	remaining := len(librarySet) - trackedInLibrary
+	accountedFor := trackedInLibrary
+	for asin := range offloadedSet {
+		if _, tracked := downloadedSet[asin]; tracked {
+			continue
+		}
+		if _, ok := librarySet[asin]; ok {
+			accountedFor++
+		}
+	}
+	remaining := len(librarySet) - accountedFor
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -709,6 +838,7 @@ func (a *App) Status(ctx context.Context, showTable bool) error {
 	fmt.Printf("Total in Audible library: %d\n", len(librarySet))
 	fmt.Printf("Tracked downloaded ASINs: %d\n", len(downloaded))
 	fmt.Printf("Tracked and still in library: %d\n", trackedInLibrary)
+	fmt.Printf("Offloaded and still in library: %d\n", offloadedInLibrary)
 	fmt.Printf("Remaining to download: %d\n", remaining)
 	fmt.Printf("Ready to listen (.m4b): %d\n", len(state.Ready))
 	fmt.Printf("Needs conversion (.aax): %d\n", len(state.NeedsAAX))
@@ -722,7 +852,8 @@ func (a *App) Status(ctx context.Context, showTable bool) error {
 				continue
 			}
 			_, tracked := downloadedSet[asin]
-			bookState := computeBookState(tracked, asinMediaIndex[asin])
+			_, offloaded := offloadedSet[asin]
+			bookState := computeBookStateWithOffloaded(tracked, offloaded, asinMediaIndex[asin])
 			rows = append(rows, [3]string{asin, strings.TrimSpace(item.Title), bookState})
 		}
 

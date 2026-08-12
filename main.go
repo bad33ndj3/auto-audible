@@ -92,6 +92,7 @@ func run(ctx context.Context, args []string) error {
 		Converter: newFFmpegConverter(),
 		FS:        newOSFS(),
 		Store:     newJSONASINStore(globals.MediaDir),
+		Offloaded: newJSONOffloadedASINStore(globals.MediaDir),
 		Prompter:  newStdinPrompter(),
 		MediaDir:  globals.MediaDir,
 	}
@@ -148,6 +149,21 @@ func buildCommands() map[string]cmdSpec {
 			NeedsAudible: false,
 			Run: func(ctx context.Context, app *App, _ *flag.FlagSet) error {
 				return app.Clean(ctx)
+			},
+		},
+		"offload": {
+			Name:         "offload",
+			Desc:         "Mark uploaded books offloaded and delete ready .m4b files",
+			NeedsAudible: true,
+			Setup: func(fs *flag.FlagSet) {
+				fs.Bool("all", false, "offload all ready .m4b files")
+				fs.Bool("yes", false, "confirm local .m4b deletion")
+			},
+			Run: func(ctx context.Context, app *App, fs *flag.FlagSet) error {
+				if fs.Lookup("all").Value.String() != "true" {
+					return fmt.Errorf("offload requires --all")
+				}
+				return app.Offload(ctx, fs.Lookup("yes").Value.String() == "true")
 			},
 		},
 		"status": {
@@ -210,6 +226,10 @@ func printDownloadPlan(plan DownloadPlan) {
 	for _, book := range plan.Present {
 		fmt.Printf("  - %s (%s)\n", book.Title, book.ASIN)
 	}
+	fmt.Printf("Offloaded; sync will skip: %d\n", len(plan.Offloaded))
+	for _, book := range plan.Offloaded {
+		fmt.Printf("  - %s (%s)\n", book.Title, book.ASIN)
+	}
 	fmt.Printf("Will download: %d\n", len(plan.Download))
 	for _, book := range plan.Download {
 		fmt.Printf("  - %s (%s)\n", book.Title, book.ASIN)
@@ -260,7 +280,7 @@ func hasFlags(fs *flag.FlagSet) bool {
 }
 
 func commandOrder(commands map[string]cmdSpec) []string {
-	order := []string{"sync", "plan", "status", "download", "convert", "clean", "ready"}
+	order := []string{"sync", "plan", "status", "download", "convert", "clean", "offload", "ready"}
 	result := make([]string, 0, len(commands))
 	for _, name := range order {
 		if _, ok := commands[name]; ok {

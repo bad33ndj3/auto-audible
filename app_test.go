@@ -312,6 +312,101 @@ func TestDownloadPlanShowsWhatSyncWillSkipAndDownload(t *testing.T) {
 	}
 }
 
+func TestDownloadPlanSkipsOffloadedBookWithoutMedia(t *testing.T) {
+	app := &App{
+		Audible:   &fakeAudible{library: []Book{{ASIN: "B001", Title: "Offloaded Book"}, {ASIN: "B002", Title: "New Book"}}},
+		FS:        newFakeFS(),
+		Store:     &fakeStore{asins: []string{"B001"}},
+		Offloaded: &fakeStore{asins: []string{"B001"}},
+		MediaDir:  "media",
+	}
+
+	plan, err := app.DownloadPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plan.Offloaded, []Book{{ASIN: "B001", Title: "Offloaded Book"}}) {
+		t.Fatalf("offloaded = %v", plan.Offloaded)
+	}
+	if !reflect.DeepEqual(plan.Download, []Book{{ASIN: "B002", Title: "New Book"}}) {
+		t.Fatalf("download = %v", plan.Download)
+	}
+}
+
+func TestOffloadPreviewDoesNotChangeMediaOrState(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/Series/01 - Book.m4b"] = []byte("ready")
+	offloaded := &fakeStore{}
+	app := &App{
+		Audible:   &fakeAudible{library: []Book{{ASIN: "B001", Title: "Book", SeriesTitle: "Series", SeriesSequence: "1"}}},
+		FS:        fs,
+		Offloaded: offloaded,
+		MediaDir:  "media",
+	}
+
+	if err := app.Offload(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.files["media/Series/01 - Book.m4b"]; !ok {
+		t.Fatal("preview removed media")
+	}
+	if len(offloaded.asins) != 0 {
+		t.Fatalf("preview recorded offloaded ASINs: %v", offloaded.asins)
+	}
+}
+
+func TestOffloadMarksThenRemovesAndPreventsRedownload(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/Book.m4b"] = []byte("ready")
+	offloaded := &fakeStore{}
+	app := &App{
+		Audible:   &fakeAudible{library: []Book{{ASIN: "B001", Title: "Book"}}},
+		FS:        fs,
+		Store:     &fakeStore{asins: []string{"B001"}},
+		Offloaded: offloaded,
+		MediaDir:  "media",
+	}
+
+	if err := app.Offload(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.files["media/Book.m4b"]; ok {
+		t.Fatal("offload did not remove media")
+	}
+	if !reflect.DeepEqual(offloaded.asins, []string{"B001"}) {
+		t.Fatalf("offloaded ASINs = %v", offloaded.asins)
+	}
+	plan, err := app.DownloadPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Offloaded) != 1 || len(plan.Download) != 0 {
+		t.Fatalf("unexpected download plan: %+v", plan)
+	}
+}
+
+func TestOffloadFailsWithoutChangingAnythingWhenMediaCannotBeMapped(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["media/Manual.m4b"] = []byte("ready")
+	offloaded := &fakeStore{}
+	app := &App{
+		Audible:   &fakeAudible{library: []Book{{ASIN: "B001", Title: "Book"}}},
+		FS:        fs,
+		Offloaded: offloaded,
+		MediaDir:  "media",
+	}
+
+	if err := app.Offload(context.Background(), true); err == nil {
+		t.Fatal("expected unmapped media to stop offload")
+	}
+	if _, ok := fs.files["media/Manual.m4b"]; !ok {
+		t.Fatal("unmapped media was removed")
+	}
+	if len(offloaded.asins) != 0 {
+		t.Fatalf("unmapped media was recorded: %v", offloaded.asins)
+	}
+}
+
 func TestDownload_RetriesTrackedBookWhenMediaIsMissing(t *testing.T) {
 	fs := newFakeFS()
 	fs.dirs["media"] = true

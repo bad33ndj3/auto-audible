@@ -221,6 +221,12 @@ func TestComputeBookState(t *testing.T) {
 	}
 }
 
+func TestComputeBookStateWithOffloaded(t *testing.T) {
+	if got := computeBookStateWithOffloaded(true, true, MediaInfo{}); got != "offloaded" {
+		t.Fatalf("unexpected offloaded state: %q", got)
+	}
+}
+
 func TestSanitizeFileName(t *testing.T) {
 	tests := []struct {
 		input string
@@ -468,5 +474,17 @@ func TestCommandsKeepAllAsASyncAlias(t *testing.T) {
 func TestCommandsExposePlan(t *testing.T) {
 	if _, ok := buildCommands()["plan"]; !ok {
 		t.Fatal("missing plan command")
+	}
+}
+
+func TestOffloadCommandFlags(t *testing.T) {
+	cmd := buildCommands()["offload"]
+	fs := flag.NewFlagSet(cmd.Name, flag.ContinueOnError)
+	cmd.Setup(fs)
+	if err := fs.Parse([]string{"--all", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Lookup("all").Value.String() != "true" || fs.Lookup("yes").Value.String() != "true" {
+		t.Fatal("offload confirmation flags were not parsed")
 	}
 }
